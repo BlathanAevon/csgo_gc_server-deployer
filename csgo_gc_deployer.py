@@ -400,7 +400,7 @@ def create_rcon_helper_script(cfg: DeployConfig) -> str:
         "  exit 1\n"
         "fi\n"
         "if ! command -v mcrcon >/dev/null 2>&1; then\n"
-        "  echo 'mcrcon is not installed. Install with: apt-get install -y mcrcon'\n"
+        "  echo 'mcrcon is not installed. Re-run the deployer to install it automatically.'\n"
         "  exit 1\n"
         "fi\n"
         f"exec mcrcon -H 127.0.0.1 -P {cfg.rcon_port} -p {shlex.quote(cfg.rcon_password)} \"$@\"\n"
@@ -455,7 +455,7 @@ def preinstall_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
     yield "apt-get update", None
     yield (
         "apt-get install -y "
-        "lib32gcc-s1 lib32stdc++6 lib32z1 screen tmux tar debsig-verify wget unzip mcrcon",
+        "lib32gcc-s1 lib32stdc++6 lib32z1 screen tmux tar debsig-verify wget unzip",
         None,
     )
     yield (
@@ -463,6 +463,20 @@ def preinstall_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
         f"useradd -m {shlex.quote(cfg.steam_user)}",
         None,
     )
+
+
+def rcon_dependency_commands() -> Iterable[tuple[str, str | None]]:
+    # Try distro package first; if unavailable, build mcrcon from source.
+    yield "command -v mcrcon >/dev/null 2>&1 || apt-get install -y mcrcon || true", None
+    yield "command -v mcrcon >/dev/null 2>&1 || apt-get install -y build-essential git ca-certificates", None
+    yield (
+        "command -v mcrcon >/dev/null 2>&1 || "
+        "(tmpd=\"$(mktemp -d)\" && "
+        "git clone --depth 1 https://github.com/Tiiffi/mcrcon \"$tmpd/mcrcon\" && "
+        "make -C \"$tmpd/mcrcon\" && "
+        "install -m 0755 \"$tmpd/mcrcon/mcrcon\" /usr/local/bin/mcrcon && "
+        "rm -rf \"$tmpd\")"
+    ), None
 
 
 def install_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
@@ -1314,6 +1328,10 @@ def deploy(cfg: DeployConfig) -> bool:
 
     _header("Phase 1  —  System packages & steam user")
     for cmd, as_user in preinstall_commands(cfg):
+        run(cmd, cfg.dry_run, as_user)
+
+    _header("Phase 1.5  —  RCON tool dependency")
+    for cmd, as_user in rcon_dependency_commands():
         run(cmd, cfg.dry_run, as_user)
 
     _header("Phase 2  —  SteamCMD + CS:GO server + csgo_gc")
