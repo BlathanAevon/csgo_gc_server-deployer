@@ -330,13 +330,19 @@ If the server has a join password, CS:GO will prompt you for it.
 ### Admin Login — SourceMod Admin Panel
 
 The deployer uses SourceMod's built-in admin panel from the official AlliedModders stack.
-No RCON setup is required.
+RCON is also configured for direct console-style administration.
 
 **Recommended client flow:**
 
 1. Join the server with your admin Steam account.
 2. Open console and run: `sm_admin`
 3. Use the SourceMod admin menu for map changes, player moderation, and server management.
+
+**RCON best-practice flow (main menu console):**
+
+1. `rcon_address SERVER_IP:RCON_PORT`
+2. `rcon_password "YOUR_RCON_PASSWORD"`
+3. `rcon status`
 
 **From SSH terminal:**
 
@@ -351,6 +357,7 @@ For frictionless SSH administration, the deployer also creates:
 
 ```bash
 /home/steam/csgo_server/console.sh
+/home/steam/csgo_server/rcon.sh
 /home/steam/csgo_server/admin.sh
 ```
 
@@ -358,6 +365,7 @@ Examples:
 
 ```bash
 su - steam -c '/home/steam/csgo_server/console.sh status'
+su - steam -c '/home/steam/csgo_server/rcon.sh status'
 su - steam -c '/home/steam/csgo_server/admin.sh status'
 su - steam -c '/home/steam/csgo_server/admin.sh restart'
 ```
