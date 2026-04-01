@@ -407,35 +407,97 @@ def create_rcon_helper_script(cfg: DeployConfig) -> str:
     )
 
 
+def create_console_helper_script(cfg: DeployConfig) -> str:
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ $# -eq 0 ]]; then\n"
+        "  echo 'Usage: ./console.sh <server command...>'\n"
+        "  echo 'Example: ./console.sh changelevel de_dust2'\n"
+        "  exit 1\n"
+        "fi\n"
+        "cmd=\"$*\"\n"
+        "session='csgo'\n"
+        f"session_tool={shlex.quote(cfg.session_tool)}\n"
+        "\n"
+        "if [[ \"$session_tool\" == 'tmux' ]]; then\n"
+        "  if ! tmux has-session -t \"$session\" 2>/dev/null; then\n"
+        "    echo \"No tmux session '$session' is running. Start the server first.\"\n"
+        "    exit 1\n"
+        "  fi\n"
+        "  tmux send-keys -t \"$session\" \"$cmd\" Enter\n"
+        "  exit 0\n"
+        "fi\n"
+        "\n"
+        "if [[ \"$session_tool\" == 'screen' ]]; then\n"
+        "  if ! screen -ls | grep -q \"[.]$session\\b\"; then\n"
+        "    echo \"No screen session '$session' is running. Start the server first.\"\n"
+        "    exit 1\n"
+        "  fi\n"
+        "  screen -S \"$session\" -X stuff \"$cmd^M\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "\n"
+        "echo \"Unsupported session tool: $session_tool\"\n"
+        "exit 1\n"
+    )
+
+
 def create_stop_script(cfg: DeployConfig) -> str:
     session = "csgo"
-    session_kill = _session_kill_command(cfg.session_tool, session)
     return (
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         f"SESSION_TOOL={shlex.quote(cfg.session_tool)}\n"
         f"STEAM_USER={shlex.quote(cfg.steam_user)}\n"
-        f"SESSION_KILL_CMD={shlex.quote(session_kill)}\n"
+        f"SESSION_NAME={shlex.quote(session)}\n"
         "\n"
-        "# Stop detached session first so it cannot respawn server children.\n"
-        "su - \"$STEAM_USER\" -c \"$SESSION_KILL_CMD\" >/dev/null 2>&1 || true\n"
+        "if [[ $(id -u) -eq 0 ]]; then\n"
+        "  TARGET_USER=\"$STEAM_USER\"\n"
+        "else\n"
+        "  TARGET_USER=\"$(id -un)\"\n"
+        "fi\n"
         "\n"
-        "# Then terminate all known Source dedicated server processes for this user.\n"
-        "PIDS=\"$(pgrep -u \"$STEAM_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "# Ask the server to quit cleanly first.\n"
+        "if [[ \"$SESSION_TOOL\" == 'tmux' ]]; then\n"
+        "  if tmux has-session -t \"$SESSION_NAME\" 2>/dev/null; then\n"
+        "    tmux send-keys -t \"$SESSION_NAME\" 'quit' Enter || true\n"
+        "  fi\n"
+        "elif [[ \"$SESSION_TOOL\" == 'screen' ]]; then\n"
+        "  if screen -ls | grep -q \"[.]$SESSION_NAME\\b\"; then\n"
+        "    screen -S \"$SESSION_NAME\" -X stuff $'quit\\r' || true\n"
+        "  fi\n"
+        "fi\n"
+        "\n"
+        "for _ in {1..8}; do\n"
+        "  sleep 1\n"
+        "  PIDS=\"$(pgrep -u \"$TARGET_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "  [[ -z \"$PIDS\" ]] && break\n"
+        "done\n"
+        "\n"
+        "# Kill detached session so it cannot respawn children.\n"
+        "if [[ \"$SESSION_TOOL\" == 'tmux' ]]; then\n"
+        "  tmux kill-session -t \"$SESSION_NAME\" >/dev/null 2>&1 || true\n"
+        "elif [[ \"$SESSION_TOOL\" == 'screen' ]]; then\n"
+        "  screen -S \"$SESSION_NAME\" -X quit >/dev/null 2>&1 || true\n"
+        "fi\n"
+        "\n"
+        "# Force-stop any leftover Source dedicated processes.\n"
+        "PIDS=\"$(pgrep -u \"$TARGET_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
         "if [[ -n \"$PIDS\" ]]; then\n"
         "  kill $PIDS >/dev/null 2>&1 || true\n"
-        "  for _ in {1..8}; do\n"
+        "  for _ in {1..6}; do\n"
         "    sleep 1\n"
-        "    REMAINING=\"$(pgrep -u \"$STEAM_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "    REMAINING=\"$(pgrep -u \"$TARGET_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
         "    [[ -z \"$REMAINING\" ]] && break\n"
         "  done\n"
-        "  REMAINING=\"$(pgrep -u \"$STEAM_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "  REMAINING=\"$(pgrep -u \"$TARGET_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
         "  if [[ -n \"$REMAINING\" ]]; then\n"
         "    kill -9 $REMAINING >/dev/null 2>&1 || true\n"
         "  fi\n"
         "fi\n"
         "\n"
-        "FINAL=\"$(pgrep -u \"$STEAM_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "FINAL=\"$(pgrep -u \"$TARGET_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
         "if [[ -n \"$FINAL\" ]]; then\n"
         "  echo 'Some server-related processes are still running:'\n"
         "  ps -fp $FINAL || true\n"
@@ -443,6 +505,99 @@ def create_stop_script(cfg: DeployConfig) -> str:
         "fi\n"
         "\n"
         "echo 'CS:GO server stop completed: no related processes remain.'\n"
+    )
+
+
+def create_admin_helper_script(cfg: DeployConfig) -> str:
+    session = "csgo"
+    start_cmd = _session_start_command(cfg.session_tool, session, str(cfg.install_dir / "start_server.sh"))
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"INSTALL_DIR={shlex.quote(str(cfg.install_dir))}\n"
+        f"SESSION_TOOL={shlex.quote(cfg.session_tool)}\n"
+        f"SESSION_NAME={shlex.quote(session)}\n"
+        f"START_CMD={shlex.quote(start_cmd)}\n"
+        "\n"
+        "usage() {\n"
+        "  echo 'Usage: ./admin.sh <start|stop|restart|status|attach|cmd|rcon> [args...]'\n"
+        "  echo 'Examples:'\n"
+        "  echo '  ./admin.sh start'\n"
+        "  echo '  ./admin.sh status'\n"
+        "  echo '  ./admin.sh cmd changelevel de_dust2'\n"
+        "  echo '  ./admin.sh rcon status'\n"
+        "}\n"
+        "\n"
+        "if [[ $# -lt 1 ]]; then\n"
+        "  usage\n"
+        "  exit 1\n"
+        "fi\n"
+        "\n"
+        "action=\"$1\"\n"
+        "shift || true\n"
+        "\n"
+        "case \"$action\" in\n"
+        "  start)\n"
+        "    cd \"$INSTALL_DIR\"\n"
+        "    if [[ \"$SESSION_TOOL\" == 'tmux' ]]; then\n"
+        "      tmux kill-session -t \"$SESSION_NAME\" >/dev/null 2>&1 || true\n"
+        "    else\n"
+        "      screen -S \"$SESSION_NAME\" -X quit >/dev/null 2>&1 || true\n"
+        "    fi\n"
+        "    eval \"$START_CMD\"\n"
+        "    ;;\n"
+        "  stop)\n"
+        "    cd \"$INSTALL_DIR\"\n"
+        "    exec ./stop_server.sh\n"
+        "    ;;\n"
+        "  restart)\n"
+        "    cd \"$INSTALL_DIR\"\n"
+        "    ./stop_server.sh\n"
+        "    sleep 1\n"
+        "    eval \"$START_CMD\"\n"
+        "    ;;\n"
+        "  status)\n"
+        "    if [[ \"$SESSION_TOOL\" == 'tmux' ]]; then\n"
+        "      if tmux has-session -t \"$SESSION_NAME\" 2>/dev/null; then\n"
+        "        echo 'Session: running (tmux)'\n"
+        "      else\n"
+        "        echo 'Session: not running (tmux)'\n"
+        "      fi\n"
+        "    else\n"
+        "      if screen -ls | grep -q \"[.]$SESSION_NAME\\b\"; then\n"
+        "        echo 'Session: running (screen)'\n"
+        "      else\n"
+        "        echo 'Session: not running (screen)'\n"
+        "      fi\n"
+        "    fi\n"
+        "    PIDS=\"$(pgrep -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "    if [[ -n \"$PIDS\" ]]; then\n"
+        "      echo 'Processes:'\n"
+        "      ps -fp $PIDS\n"
+        "    else\n"
+        "      echo 'Processes: none'\n"
+        "    fi\n"
+        "    ;;\n"
+        "  attach)\n"
+        "    if [[ \"$SESSION_TOOL\" == 'tmux' ]]; then\n"
+        "      exec tmux attach -t \"$SESSION_NAME\"\n"
+        "    else\n"
+        "      exec screen -r \"$SESSION_NAME\"\n"
+        "    fi\n"
+        "    ;;\n"
+        "  cmd)\n"
+        "    cd \"$INSTALL_DIR\"\n"
+        "    exec ./console.sh \"$@\"\n"
+        "    ;;\n"
+        "  rcon)\n"
+        "    cd \"$INSTALL_DIR\"\n"
+        "    exec ./rcon.sh \"$@\"\n"
+        "    ;;\n"
+        "  *)\n"
+        "    usage\n"
+        "    exit 1\n"
+        "    ;;\n"
+        "esac\n"
     )
 
 
@@ -1347,16 +1502,22 @@ def deploy(cfg: DeployConfig) -> bool:
     server_cfg_path  = cfg.install_dir / "csgo" / "cfg" / "server.cfg"
     start_script_path = cfg.install_dir / "start_server.sh"
     rcon_script_path = cfg.install_dir / "rcon.sh"
+    console_script_path = cfg.install_dir / "console.sh"
     stop_script_path = cfg.install_dir / "stop_server.sh"
+    admin_script_path = cfg.install_dir / "admin.sh"
 
     write_text(server_cfg_path,  render_server_cfg(cfg), cfg.dry_run)
     write_text(start_script_path, create_start_script(cfg), cfg.dry_run)
     write_text(rcon_script_path, create_rcon_helper_script(cfg), cfg.dry_run)
+    write_text(console_script_path, create_console_helper_script(cfg), cfg.dry_run)
     write_text(stop_script_path, create_stop_script(cfg), cfg.dry_run)
+    write_text(admin_script_path, create_admin_helper_script(cfg), cfg.dry_run)
 
     run(f"chmod +x {shlex.quote(str(start_script_path))}", cfg.dry_run)
     run(f"chmod +x {shlex.quote(str(rcon_script_path))}", cfg.dry_run)
+    run(f"chmod +x {shlex.quote(str(console_script_path))}", cfg.dry_run)
     run(f"chmod +x {shlex.quote(str(stop_script_path))}", cfg.dry_run)
+    run(f"chmod +x {shlex.quote(str(admin_script_path))}", cfg.dry_run)
     run(
         f"chown -R {shlex.quote(cfg.steam_user)}:{shlex.quote(cfg.steam_user)} "
         f"{shlex.quote(str(cfg.install_dir))}",
@@ -1396,6 +1557,9 @@ def deploy(cfg: DeployConfig) -> bool:
     print(f"     su - {cfg.steam_user} -c '{_session_attach_command(cfg.session_tool, 'csgo')}'")
     _info("Stop the server completely (session + all related processes):")
     print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/stop_server.sh'")
+    _info("All-in-one admin helper (recommended):")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/admin.sh status'")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/admin.sh restart'")
     if cfg.session_tool == "tmux":
         _info("Detach without stopping the server: Ctrl+B then D")
     else:
@@ -1411,8 +1575,12 @@ def deploy(cfg: DeployConfig) -> bool:
     print(f"     rcon_address {cfg.server_ip}:{cfg.rcon_port}")
     print(f"     rcon_password \"{cfg.rcon_password}\"")
     print("     rcon status")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/console.sh status'")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/console.sh changelevel de_dust2'")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/admin.sh cmd status'")
     print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh status'")
     print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh changelevel de_dust2'")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/admin.sh rcon status'")
     print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh sv_lan'")
     print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh rcon_password'")
     if cfg.install_sourcemod_stack:

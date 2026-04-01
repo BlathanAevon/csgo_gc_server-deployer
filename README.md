@@ -342,6 +342,13 @@ Use the dedicated RCON port from the wizard for `SERVER_PORT` (default `27016`),
 
 This is more reliable than typing `rcon_password` after you are already in-game. Some client builds behave inconsistently once you are connected to the server.
 
+Best practice for client-side reliability:
+
+- Set `rcon_address` and `rcon_password` from the main menu, then connect to the server.
+- Keep `rcon_password` quoted if it contains symbols.
+- Prefer a dedicated RCON port (`27016`) over reusing game traffic port (`27015`).
+- Treat in-game RCON as convenience only; keep an SSH-based admin path as primary control.
+
 **From SSH terminal:**
 
 ```bash
@@ -355,6 +362,8 @@ For frictionless SSH administration, the deployer also creates:
 
 ```bash
 /home/steam/csgo_server/rcon.sh
+/home/steam/csgo_server/console.sh
+/home/steam/csgo_server/admin.sh
 ```
 
 Examples:
@@ -362,7 +371,56 @@ Examples:
 ```bash
 su - steam -c '/home/steam/csgo_server/rcon.sh status'
 su - steam -c '/home/steam/csgo_server/rcon.sh changelevel de_dust2'
+su - steam -c '/home/steam/csgo_server/console.sh status'
+su - steam -c '/home/steam/csgo_server/admin.sh status'
+su - steam -c '/home/steam/csgo_server/admin.sh restart'
 ```
+
+When RCON is unreliable, use direct server-console injection (no RCON required):
+
+```bash
+su - steam -c '/home/steam/csgo_server/console.sh status'
+su - steam -c '/home/steam/csgo_server/console.sh mp_roundtime 2'
+su - steam -c '/home/steam/csgo_server/console.sh changelevel de_inferno'
+```
+
+`console.sh` sends the command straight into the live tmux/screen SRCDS session. This avoids client-side RCON state issues and is the most frictionless fallback for administrators.
+
+---
+
+### RCON Troubleshooting Checklist
+
+If `rcon status` fails in the game client:
+
+1. Verify server-side local admin works first:
+
+```bash
+su - steam -c '/home/steam/csgo_server/rcon.sh status'
+```
+
+2. Confirm the server is not LAN-locked:
+
+```bash
+su - steam -c '/home/steam/csgo_server/rcon.sh sv_lan'
+```
+
+Expected result should include `0`.
+
+3. Confirm firewall allows RCON port from your admin location:
+
+```bash
+sudo ufw status numbered
+```
+
+4. In client main-menu console, rebind in order:
+
+```text
+rcon_address YOUR_SERVER_IP:27016
+rcon_password "YOUR_PASSWORD"
+rcon status
+```
+
+5. If the client still fails, manage with `console.sh` or by attaching SRCDS console directly (`tmux attach -t csgo`).
 
 ---
 
@@ -496,30 +554,29 @@ sudo -u steam tail -f /home/steam/csgo_server/csgo/logs/L*.log
 
 ### Stopping the Server
 
-**Graceful stop (from rcon):**
-```
-rcon quit
-```
+Recommended stop path (frictionless):
 
-This gives connected players a chance to disconnect cleanly. Allow ~10 seconds for the process to exit.
-
-**Immediate stop (from SSH):**
 ```bash
-sudo -u steam pkill -f srcds_run
+su - steam -c '/home/steam/csgo_server/stop_server.sh'
 ```
 
-Then detach from tmux: `Ctrl+B` then `D`
+What it does:
 
-**Clean restart (stop + start):**
+- Tries graceful shutdown first (`quit` in SRCDS console).
+- Kills tmux/screen session so children cannot respawn.
+- Escalates TERM then KILL for leftover server processes.
+- Verifies no `srcds`/`csgo_gc` processes remain.
+
+All-in-one management (best practice):
+
 ```bash
-# Kill the old process
-sudo -u steam pkill -f srcds_run
-
-# Wait a moment
-sleep 2
-
-# Start fresh in a new tmux session
-sudo -u steam tmux new-session -d -s csgo 'cd /home/steam/csgo_server && ./start_server.sh'
+su - steam -c '/home/steam/csgo_server/admin.sh start'
+su - steam -c '/home/steam/csgo_server/admin.sh stop'
+su - steam -c '/home/steam/csgo_server/admin.sh restart'
+su - steam -c '/home/steam/csgo_server/admin.sh status'
+su - steam -c '/home/steam/csgo_server/admin.sh attach'
+su - steam -c '/home/steam/csgo_server/admin.sh cmd changelevel de_inferno'
+su - steam -c '/home/steam/csgo_server/admin.sh rcon status'
 ```
 
 ---
