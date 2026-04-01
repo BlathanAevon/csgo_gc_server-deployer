@@ -252,7 +252,7 @@ def render_server_cfg(cfg: DeployConfig) -> str:
 
 def start_command(cfg: DeployConfig) -> str:
     return (
-        "./srcds_run -game csgo -console -usercon -insecure "
+        "bash srcds_run -game csgo -console -usercon -insecure "
         f"-tickrate {cfg.tickrate} +port {cfg.port} +map {cfg.map_name} "
         f"-hostip {cfg.server_ip} +ip {cfg.server_ip} "
         f"+sv_setsteamaccount {cfg.steam_token} "
@@ -307,6 +307,15 @@ def install_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
         f"cd {shlex.quote(str(cfg.install_dir))} && "
         f"wget -N {CSGO_GC_URL} -O csgo_gc-ubuntu-latest.zip && "
         "unzip -o csgo_gc-ubuntu-latest.zip",
+        cfg.steam_user,
+    )
+    # Remove the stale bundled libgcc_s / libstdc++ that CS:GO ships.
+    # They conflict with the system's newer 32-bit versions on Ubuntu 22+ and
+    # cause the 'GCC_7.0.0 not found' crash loop at startup.
+    yield (
+        f"rm -f "
+        f"{shlex.quote(str(cfg.install_dir / 'bin' / 'libgcc_s.so.1'))} "
+        f"{shlex.quote(str(cfg.install_dir / 'bin' / 'libstdc++.so.6'))}",
         cfg.steam_user,
     )
 
