@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -353,6 +354,8 @@ def start_command(cfg: DeployConfig) -> str:
         cfg.steam_token,
         "+sv_pure",
         "1",
+        "+sv_lan",
+        "0",
         "+rcon_port",
         str(cfg.rcon_port),
         "+game_type",
@@ -404,6 +407,45 @@ def create_rcon_helper_script(cfg: DeployConfig) -> str:
     )
 
 
+def create_stop_script(cfg: DeployConfig) -> str:
+    session = "csgo"
+    session_kill = _session_kill_command(cfg.session_tool, session)
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"SESSION_TOOL={shlex.quote(cfg.session_tool)}\n"
+        f"STEAM_USER={shlex.quote(cfg.steam_user)}\n"
+        f"SESSION_KILL_CMD={shlex.quote(session_kill)}\n"
+        "\n"
+        "# Stop detached session first so it cannot respawn server children.\n"
+        "su - \"$STEAM_USER\" -c \"$SESSION_KILL_CMD\" >/dev/null 2>&1 || true\n"
+        "\n"
+        "# Then terminate all known Source dedicated server processes for this user.\n"
+        "PIDS=\"$(pgrep -u \"$STEAM_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "if [[ -n \"$PIDS\" ]]; then\n"
+        "  kill $PIDS >/dev/null 2>&1 || true\n"
+        "  for _ in {1..8}; do\n"
+        "    sleep 1\n"
+        "    REMAINING=\"$(pgrep -u \"$STEAM_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "    [[ -z \"$REMAINING\" ]] && break\n"
+        "  done\n"
+        "  REMAINING=\"$(pgrep -u \"$STEAM_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "  if [[ -n \"$REMAINING\" ]]; then\n"
+        "    kill -9 $REMAINING >/dev/null 2>&1 || true\n"
+        "  fi\n"
+        "fi\n"
+        "\n"
+        "FINAL=\"$(pgrep -u \"$STEAM_USER\" -f 'srcds_linux|srcds_run|csgo_gc|hl2_linux' || true)\"\n"
+        "if [[ -n \"$FINAL\" ]]; then\n"
+        "  echo 'Some server-related processes are still running:'\n"
+        "  ps -fp $FINAL || true\n"
+        "  exit 1\n"
+        "fi\n"
+        "\n"
+        "echo 'CS:GO server stop completed: no related processes remain.'\n"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Command iterables (unchanged deployment logic)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -413,7 +455,7 @@ def preinstall_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
     yield "apt-get update", None
     yield (
         "apt-get install -y "
-        "lib32gcc-s1 lib32stdc++6 lib32z1 screen tmux tar debsig-verify wget unzip",
+        "lib32gcc-s1 lib32stdc++6 lib32z1 screen tmux tar debsig-verify wget unzip mcrcon",
         None,
     )
     yield (
@@ -1162,7 +1204,7 @@ def _session_kill_command(session_tool: str, session_name: str) -> str:
 # Post-deploy server launch
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _offer_launch(cfg: DeployConfig) -> None:
+def _offer_launch(cfg: DeployConfig) -> bool:
     """Offer to start the server immediately in a detached session."""
     print()
     launch = _ask_bool(
@@ -1171,7 +1213,7 @@ def _offer_launch(cfg: DeployConfig) -> None:
         hint=f"Launches as '{cfg.steam_user}' in a detached {cfg.session_tool} session named 'csgo'.",
     )
     if not launch:
-        return
+        return False
 
     session = "csgo"
     start_script = str(cfg.install_dir / "start_server.sh")
@@ -1184,7 +1226,7 @@ def _offer_launch(cfg: DeployConfig) -> None:
     )
     if result.returncode != 0:
         print(_c(f"  [WARN] Could not start {cfg.session_tool} session automatically. Start the server manually using the command below.", _YELLOW))
-        return
+        return False
 
     print()
     print(_c(f"  Server is running in {cfg.session_tool} session '{session}'.", _GREEN, _BOLD))
@@ -1199,9 +1241,58 @@ def _offer_launch(cfg: DeployConfig) -> None:
     if cfg.sv_password:
         _info(f"Join password: {cfg.sv_password}")
     _info("If RCON does not bind while already in-game, use the main-menu console flow below:")
-    print(f"     rcon_address {cfg.server_ip}:{cfg.port}")
+    print(f"     rcon_address {cfg.server_ip}:{cfg.rcon_port}")
     print(f"     rcon_password \"{cfg.rcon_password}\"")
     print("     rcon status")
+    return True
+
+
+def _run_local_rcon(cfg: DeployConfig, command: str) -> subprocess.CompletedProcess[str]:
+    rcon_helper = cfg.install_dir / "rcon.sh"
+    return subprocess.run(
+        ["su", "-", cfg.steam_user, "-c", f"{shlex.quote(str(rcon_helper))} {shlex.quote(command)}"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+
+def _post_start_self_test(cfg: DeployConfig, attempts: int = 20, delay_sec: float = 1.0) -> None:
+    """Validate that RCON works and sv_lan is forced to 0 after startup."""
+    _header("Post-start self-test")
+    _info("Validating local RCON authentication and LAN mode...")
+
+    last_status_output = ""
+    for attempt in range(1, attempts + 1):
+        status = _run_local_rcon(cfg, "status")
+        status_out = (status.stdout + status.stderr).strip()
+        last_status_output = status_out or f"(exit code {status.returncode})"
+        if status.returncode == 0:
+            break
+        if attempt < attempts:
+            _info(f"RCON not ready yet (attempt {attempt}/{attempts}); retrying...")
+            time.sleep(delay_sec)
+    else:
+        raise RuntimeError(
+            "Post-start self-test failed: local RCON authentication did not succeed. "
+            f"Last output: {last_status_output}"
+        )
+
+    sv_lan = _run_local_rcon(cfg, "sv_lan")
+    sv_lan_out = (sv_lan.stdout + sv_lan.stderr).strip()
+    if sv_lan.returncode != 0:
+        raise RuntimeError(
+            "Post-start self-test failed: could not query sv_lan via local RCON. "
+            f"Output: {sv_lan_out or '(empty)'}"
+        )
+    if re.search(r"\bsv_lan\b.*\b0\b", sv_lan_out) is None and sv_lan_out.strip() != "0":
+        raise RuntimeError(
+            "Post-start self-test failed: sv_lan is not 0 (server appears LAN-restricted). "
+            f"Output: {sv_lan_out}"
+        )
+
+    print(_c("  [OK] RCON auth check passed.", _GREEN))
+    print(_c("  [OK] sv_lan check passed (0).", _GREEN))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1235,16 +1326,19 @@ def deploy(cfg: DeployConfig) -> bool:
             run(cmd, cfg.dry_run, as_user)
 
     _header("Phase 3  —  Config files")
-    server_cfg_path  = cfg.install_dir / "csgo" / "server.cfg"
+    server_cfg_path  = cfg.install_dir / "csgo" / "cfg" / "server.cfg"
     start_script_path = cfg.install_dir / "start_server.sh"
     rcon_script_path = cfg.install_dir / "rcon.sh"
+    stop_script_path = cfg.install_dir / "stop_server.sh"
 
     write_text(server_cfg_path,  render_server_cfg(cfg), cfg.dry_run)
     write_text(start_script_path, create_start_script(cfg), cfg.dry_run)
     write_text(rcon_script_path, create_rcon_helper_script(cfg), cfg.dry_run)
+    write_text(stop_script_path, create_stop_script(cfg), cfg.dry_run)
 
     run(f"chmod +x {shlex.quote(str(start_script_path))}", cfg.dry_run)
     run(f"chmod +x {shlex.quote(str(rcon_script_path))}", cfg.dry_run)
+    run(f"chmod +x {shlex.quote(str(stop_script_path))}", cfg.dry_run)
     run(
         f"chown -R {shlex.quote(cfg.steam_user)}:{shlex.quote(cfg.steam_user)} "
         f"{shlex.quote(str(cfg.install_dir))}",
@@ -1273,13 +1367,17 @@ def deploy(cfg: DeployConfig) -> bool:
         print()
         print(_c("  (Dry-run — no system changes were made)", _YELLOW))
     else:
-        _offer_launch(cfg)
+        started = _offer_launch(cfg)
+        if started:
+            _post_start_self_test(cfg)
 
     _header("Manual start reference")
     _info(f"Start the server in a detached {cfg.session_tool} session:")
     print(f"     su - {cfg.steam_user} -c '{_session_start_command(cfg.session_tool, 'csgo', str(cfg.install_dir / 'start_server.sh'))}'")
     _info("Attach to the running session:")
     print(f"     su - {cfg.steam_user} -c '{_session_attach_command(cfg.session_tool, 'csgo')}'")
+    _info("Stop the server completely (session + all related processes):")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/stop_server.sh'")
     if cfg.session_tool == "tmux":
         _info("Detach without stopping the server: Ctrl+B then D")
     else:
@@ -1297,6 +1395,8 @@ def deploy(cfg: DeployConfig) -> bool:
     print("     rcon status")
     print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh status'")
     print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh changelevel de_dust2'")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh sv_lan'")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh rcon_password'")
     if cfg.install_sourcemod_stack:
         print()
         _header("Addon verification")
