@@ -165,6 +165,9 @@ The deployer now writes the numeric mode pair into `server.cfg` and also passes 
 **RCON password**
 The remote console password used to administrate the server. Leave blank to have the tool generate a cryptographically random password for you. The generated password is printed at the end of the wizard.
 
+**RCON port**
+The wizard configures a dedicated RCON port (default `27016`) so game traffic and admin control stay separate. This is more reliable than sharing the game port.
+
 **Server join password**
 Leave blank for a public server (no password required to join). Fill in if you want a private server.
 
@@ -175,6 +178,7 @@ If you answer `y`, the tool will install `ufw` (if not already present) and open
 |---|---|
 | 22 | SSH — keeps you connected to your VPS |
 | 27015 (or your custom port) | CS:GO game traffic |
+| 27016 (or your custom RCON port) | RCON administration (TCP) |
 | 80, 443 | Web (only if you also answer `y` to the follow-up question) |
 
 **Session manager**
@@ -334,6 +338,8 @@ If the server has a join password, CS:GO will prompt you for it.
 3. Enter: `rcon_password "YOUR_ADMIN_PASSWORD"`
 4. Test it with: `rcon status`
 
+Use the dedicated RCON port from the wizard for `SERVER_PORT` (default `27016`), not the gameplay port.
+
 This is more reliable than typing `rcon_password` after you are already in-game. Some client builds behave inconsistently once you are connected to the server.
 
 **From SSH terminal:**
@@ -344,6 +350,19 @@ su - steam -c 'tmux attach -t csgo'
 ```
 
 Once attached, you can type server commands directly into the SRCDS console without using RCON at all. If you prefer remote admin tools, use a real Source RCON client instead of `nc`.
+
+For frictionless SSH administration, the deployer also creates:
+
+```bash
+/home/steam/csgo_server/rcon.sh
+```
+
+Examples:
+
+```bash
+su - steam -c '/home/steam/csgo_server/rcon.sh status'
+su - steam -c '/home/steam/csgo_server/rcon.sh changelevel de_dust2'
+```
 
 ---
 

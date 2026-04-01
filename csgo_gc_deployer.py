@@ -58,6 +58,7 @@ class DeployConfig:
     steam_token: str
     hostname: str
     rcon_password: str
+    rcon_port: int
     sv_password: str
     port: int
     map_name: str
@@ -287,6 +288,7 @@ def render_server_cfg(cfg: DeployConfig) -> str:
         f'// Basic server identity\n'
         f'hostname "{cfg.hostname}"\n'
         f'rcon_password "{cfg.rcon_password}"\n'
+        f'rcon_port {cfg.rcon_port}\n'
         f'sv_password "{cfg.sv_password}"\n'
         f'\n'
         f'// Game mode\n'
@@ -351,6 +353,8 @@ def start_command(cfg: DeployConfig) -> str:
         cfg.steam_token,
         "+sv_pure",
         "1",
+        "+rcon_port",
+        str(cfg.rcon_port),
         "+game_type",
         str(cfg.game_type),
         "+game_mode",
@@ -380,6 +384,23 @@ def create_start_script(cfg: DeployConfig) -> str:
         "set -euo pipefail\n"
         f"cd {shlex.quote(str(cfg.install_dir))}\n"
         f"exec {start_command(cfg)}\n"
+    )
+
+
+def create_rcon_helper_script(cfg: DeployConfig) -> str:
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ $# -eq 0 ]]; then\n"
+        "  echo 'Usage: ./rcon.sh <command...>'\n"
+        "  echo 'Example: ./rcon.sh status'\n"
+        "  exit 1\n"
+        "fi\n"
+        "if ! command -v mcrcon >/dev/null 2>&1; then\n"
+        "  echo 'mcrcon is not installed. Install with: apt-get install -y mcrcon'\n"
+        "  exit 1\n"
+        "fi\n"
+        f"exec mcrcon -H 127.0.0.1 -P {cfg.rcon_port} -p {shlex.quote(cfg.rcon_password)} \"$@\"\n"
     )
 
 
@@ -516,7 +537,10 @@ def deploy_plugin_artifact(cfg: DeployConfig) -> None:
 def firewall_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
     yield "command -v ufw >/dev/null 2>&1 || apt-get install -y ufw", None
     yield "ufw allow 22", None
-    yield f"ufw allow {cfg.port}", None
+    yield f"ufw allow {cfg.port}/udp", None
+    yield f"ufw allow {cfg.port}/tcp", None
+    if cfg.rcon_port != cfg.port:
+        yield f"ufw allow {cfg.rcon_port}/tcp", None
     if cfg.allow_web_ports:
         yield "ufw allow 80", None
         yield "ufw allow 443", None
@@ -902,11 +926,8 @@ def wizard() -> DeployConfig:
             saved["map_name"] = map_name
     else:
         # Use defaults for all game mode settings
-        game_mode = d("game_mode", "competitive")
-        game_type, game_mode_id, default_skirmish = _mode_launch_settings(game_mode)
-        game_type = int(d("game_type", str(game_type)))
-        game_mode_id = int(d("game_mode_id", str(game_mode_id)))
-        sv_skirmish_id = int(d("sv_skirmish_id", str(default_skirmish)))
+        game_mode = "competitive"
+        game_type, game_mode_id, sv_skirmish_id = _mode_launch_settings(game_mode)
         mp_startmoney = int(d("mp_startmoney", "2400"))
         mp_maxmoney = int(d("mp_maxmoney", "16000"))
         mp_warmuptime = int(d("mp_warmuptime", "60"))
@@ -938,6 +959,12 @@ def wizard() -> DeployConfig:
         secret=True,
     )
     rcon_password = rcon_raw or secrets.token_urlsafe(16)
+
+    rcon_port = _ask_port(
+        "RCON port",
+        default=int(d("rcon_port", "27016")),
+    )
+    saved["rcon_port"] = str(rcon_port)
 
     sv_password = _ask(
         "Server join password",
@@ -1019,6 +1046,7 @@ def wizard() -> DeployConfig:
         steam_token=steam_token or "YOUR_STEAM_TOKEN",
         hostname=hostname,
         rcon_password=rcon_password,
+        rcon_port=rcon_port,
         sv_password=sv_password,
         port=port,
         map_name=map_name,
@@ -1088,6 +1116,7 @@ def _print_summary(cfg: DeployConfig) -> None:
         ("SourceMod stack", "yes" if cfg.install_sourcemod_stack else "no"),
         ("Plugin artifact", str(cfg.plugin_source_path) if cfg.plugin_source_path else _c("(none)", _DIM)),
         ("RCON password",   _c("(set)", _DIM)),
+        ("RCON port",       str(cfg.rcon_port)),
         ("Join password",   _c("(set)", _DIM) if cfg.sv_password else _c("(none — public)", _DIM)),
         ("Steam user",      cfg.steam_user),
         ("Install dir",     str(cfg.install_dir)),
@@ -1208,11 +1237,14 @@ def deploy(cfg: DeployConfig) -> bool:
     _header("Phase 3  —  Config files")
     server_cfg_path  = cfg.install_dir / "csgo" / "server.cfg"
     start_script_path = cfg.install_dir / "start_server.sh"
+    rcon_script_path = cfg.install_dir / "rcon.sh"
 
     write_text(server_cfg_path,  render_server_cfg(cfg), cfg.dry_run)
     write_text(start_script_path, create_start_script(cfg), cfg.dry_run)
+    write_text(rcon_script_path, create_rcon_helper_script(cfg), cfg.dry_run)
 
     run(f"chmod +x {shlex.quote(str(start_script_path))}", cfg.dry_run)
+    run(f"chmod +x {shlex.quote(str(rcon_script_path))}", cfg.dry_run)
     run(
         f"chown -R {shlex.quote(cfg.steam_user)}:{shlex.quote(cfg.steam_user)} "
         f"{shlex.quote(str(cfg.install_dir))}",
@@ -1260,9 +1292,11 @@ def deploy(cfg: DeployConfig) -> bool:
     print(f"     connect {cfg.server_ip}:{cfg.port}")
     if cfg.sv_password:
         _info(f"Join password: {cfg.sv_password}")
-    print(f"     rcon_address {cfg.server_ip}:{cfg.port}")
+    print(f"     rcon_address {cfg.server_ip}:{cfg.rcon_port}")
     print(f"     rcon_password \"{cfg.rcon_password}\"")
     print("     rcon status")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh status'")
+    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh changelevel de_dust2'")
     if cfg.install_sourcemod_stack:
         print()
         _header("Addon verification")
