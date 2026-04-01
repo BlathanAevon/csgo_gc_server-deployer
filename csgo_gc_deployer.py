@@ -200,8 +200,8 @@ def _ask_choice(label: str, choices: list[str], default: str, hint: str = "") ->
 
 def run(cmd: str, dry_run: bool = False, as_user: str | None = None) -> None:
     if as_user:
-        command = ["sudo", "-u", as_user, "bash", "-lc", cmd]
-        printable = f"sudo -u {as_user} bash -lc {shlex.quote(cmd)}"
+        command = ["su", "-", as_user, "-c", cmd]
+        printable = f"su - {as_user} -c {shlex.quote(cmd)}"
     else:
         command = ["bash", "-lc", cmd]
         printable = cmd
@@ -558,6 +558,45 @@ def _confirm_or_abort(cfg: DeployConfig) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Post-deploy server launch
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _offer_launch(cfg: DeployConfig) -> None:
+    """Offer to start the server immediately in a detached tmux session."""
+    print()
+    launch = _ask_bool(
+        "Start the server now?",
+        default=True,
+        hint=f"Launches as '{cfg.steam_user}' in a detached tmux session named 'csgo'.",
+    )
+    if not launch:
+        return
+
+    session = "csgo"
+    start_script = str(cfg.install_dir / "start_server.sh")
+
+    # Kill any stale same-named session silently
+    subprocess.run(
+        ["su", "-", cfg.steam_user, "-c",
+         f"tmux kill-session -t {session} 2>/dev/null; true"],
+        check=False,
+    )
+    result = subprocess.run(
+        ["su", "-", cfg.steam_user, "-c",
+         f"tmux new-session -d -s {shlex.quote(session)} {shlex.quote(start_script)}"],
+        check=False,
+    )
+    if result.returncode != 0:
+        print(_c("  [WARN] Could not start tmux session automatically. Start the server manually using the command below.", _YELLOW))
+        return
+
+    print()
+    print(_c(f"  Server is running in tmux session '{session}'.", _GREEN, _BOLD))
+    _info(f"Attach to the console:  su - {cfg.steam_user} -c 'tmux attach -t {session}'")
+    _info("Detach without stopping: Ctrl+B then D")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main deploy routine
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -604,18 +643,22 @@ def deploy(cfg: DeployConfig) -> bool:
     # ── Final instructions ─────────────────────────────────────────────────
     print()
     print(_c(" ✔  Done!", _GREEN, _BOLD))
-    print()
-    _header("How to start your server")
-    _info(f"1. Open a {cfg.session_tool} session:")
-    print(f"     sudo -u {cfg.steam_user} {cfg.session_tool}")
-    _info("2. Launch the server:")
-    print(f"     sudo -u {cfg.steam_user} bash -lc 'cd {cfg.install_dir} && ./start_server.sh'")
-    print()
-    _info("Full start command:")
-    print(f"     {start_command(cfg)}")
+
     if cfg.dry_run:
         print()
         print(_c("  (Dry-run — no system changes were made)", _YELLOW))
+    else:
+        _offer_launch(cfg)
+
+    _header("Manual start reference")
+    _info("Start the server in a detached tmux session:")
+    print(f"     su - {cfg.steam_user} -c 'tmux new-session -d -s csgo {cfg.install_dir}/start_server.sh'")
+    _info("Attach to the running session:")
+    print(f"     su - {cfg.steam_user} -c 'tmux attach -t csgo'")
+    _info("Detach without stopping the server: Ctrl+B then D")
+    print()
+    _info("Full start command:")
+    print(f"     {start_command(cfg)}")
     return True
 
 
