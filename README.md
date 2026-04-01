@@ -15,10 +15,12 @@ No flags, no manual commands — just answer the prompts and the tool does the r
   - [Step 1 — Server identity](#step-1--server-identity)
   - [Step 2 — Steam token](#step-2--steam-token)
   - [Step 3 — Advanced settings](#step-3--advanced-settings)
+  - [Step 3.5 — Game mode & behavior](#step-35--game-mode--behavior)
   - [Step 4 — Security & extras](#step-4--security--extras)
   - [Dry-run vs. real deployment](#dry-run-vs-real-deployment)
   - [Confirmation summary](#confirmation-summary)
 - [After Deployment — Starting Your Server](#after-deployment--starting-your-server)
+- [Server Management — Connection & Administration](#server-management--connection--administration)
 - [Customizing Defaults](#customizing-defaults)
 - [Security Notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
@@ -106,6 +108,54 @@ Press **Enter** (accepting `n`) to skip this step entirely and use the recommend
 
 ---
 
+### Step 3.5 — Game mode & behavior
+
+You are asked whether you want to customise game mode and server behavior:
+
+**Game mode selection**
+- `competitive` — Valve ladder format (freeze time, economy rounds, defuse/plant objective)
+- `casual` — Relaxed economy with lower stakes
+- `deathmatch` — Unrestricted respawn, higher starting cash
+- `arms_race` — Progressive weapon upgrades per round
+- `flying_scoutsman` — Scout-only pistol mode
+
+**Economy preset** (only if customizing)
+- `conservative` — Low starting money ($1000–$8000 max), forces economic strategy
+- `standard` — Balanced ($2400–$16000), Valve default
+- `aggressive` — High starting money ($3500–$20000), beginner-friendly
+
+**Match timing**
+- Warmup time — seconds before match starts (0 to skip)
+- Freeze time — seconds players remain frozen at round start
+- Round time — minutes per round
+- Buy time — seconds to purchase weapons each round
+
+**Team dynamics**
+- Dead player voice chat — allow dead players to communicate across teams?
+- Auto-kick idle players — remove inactive players automatically?
+- Punish team killers — damage team-killing players?
+- Force dead spectator view — lock dead players to view their killer?
+
+**Bot configuration**
+- Bot count — number of bots (0–32)
+- Bot difficulty — 0=easy, 1=normal, 2=hard, 3=expert
+- Controllable bots — allow players to take control of bots?
+
+**GOTV (server demo recording)**
+- Enable GOTV — record all matches for replay and analysis
+- GOTV max spectators — how many people can watch the live server feed
+- GOTV delay — seconds of delay on the broadcast (privacy/anti-cheat)
+
+**Logging**
+- Log bans — record ban events to file?
+- Echo logs to console — also print logs onscreen?
+- Single log file — combine all logs or create per-session files?
+- Sleep when empty — reduce server CPU load when no players connected?
+
+Press **Enter** to skip and accept competitive defaults, or answer `y` to customize these settings.
+
+---
+
 ### Step 4 — Security & extras
 
 **RCON password**
@@ -188,7 +238,216 @@ sudo -u steam bash -lc 'cd /home/steam/csgo_server && ./start_server.sh'
 
 ---
 
-## Customizing Defaults
+## Server Management — Connection & Administration
+
+Once the server is running, you need to know how to connect, log in as admin, execute commands, and modify settings.
+
+### Connecting as a Player
+
+In your CS:GO client, press `~` (tilde) to open the console and enter:
+
+```
+connect <server_ip>:<port>
+```
+
+Replace `<server_ip>` with the public IP you entered and `<port>` with the game port (default `27015`).
+
+**Example:**
+```
+connect 203.0.113.42:27015
+```
+
+If the server has a join password, CS:GO will prompt you for it.
+
+---
+
+### Admin Login — Using RCON
+
+**Remote Console (RCON)** lets you execute server commands from your client or SSH terminal.
+
+**In-game admin login:**
+
+1. Open the console (`~`)
+2. Enter: `rcon_password YOUR_ADMIN_PASSWORD`
+3. Execute a command to test: `rcon say Testing admin access`
+
+If successful, you now have admin rights. Execute any RCON command with the `rcon CMD` prefix.
+
+**From SSH terminal:**
+
+```bash
+# Connect via SSH and use the terminal directly:
+echo "say Message from SSH terminal" | nc -w1 SERVER_IP SERVER_PORT
+```
+
+Or use a third-party RCON client. The most common is **SourceRCON** or **GameServers**.
+
+---
+
+### Essential RCON Commands
+
+| Command | Effect |
+|---|---|
+| `say TEXT` | Broadcast a message to all players |
+| `status` | List all connected players and their scores |
+| `changelevel MAP_NAME` | Change map immediately |
+| `kick PLAYER_ID` | Remove a player (use `status` to find ID) |
+| `ban PLAYER_ID TIME` | Ban a player (time in minutes; `0` = permanent) |
+| `mp_autokick 1` 15 Enable/disable auto-kick of idle players |
+| `bot_add` | Add a bot |
+| `bot_knifing_skill 100` | Make bots more aggressive |
+| `quit` | Gracefully shut down the server |
+
+---
+
+### Game Mode Configuration
+
+All game modes are controlled via `server.cfg` which is written by the deployer. You have these options:
+
+**Competitive (default)**
+```
+mp_warmuptime 60          // Warm-up before match starts
+mp_freezetime 15          // Players frozen at round start
+mp_roundtime 1.92         // ~115 seconds per round
+mp_startmoney 2400        // Starting economy
+mp_maxmoney 16000         // Maximum team money
+```
+
+**Casual mode**
+```
+mp_warmuptime 0           // No warm-up
+mp_freezetime 3           // Very short freeze
+mp_roundtime 3            // Longer rounds
+mp_startmoney 5000        // Higher starting cash
+mp_maxmoney 24000         // Higher economy
+```
+
+**Deathmatch**
+```
+game_mode 1               // DM mode
+mp_startmoney 10000       // Very high cash
+mp_freakshow 0            // Normal spawning
+mp_teammate_visibility 1  // Teammates visible through walls
+```
+
+To apply changes after deployment:
+
+**Option A (in-game, temporary):**
+```
+rcon mp_freezetime 10
+rcon mp_warmuptime 120
+```
+
+**Option B (persistent, via SSH):**
+```bash
+sudo -u steam nano /home/steam/csgo_server/csgo/server.cfg
+# Edit settings, save (Ctrl+X, Y, Enter)
+rcon quit  # Gracefully restart the server
+```
+
+---
+
+### Bot Configuration
+
+Control bot behavior with these commands:
+
+| Command | Effect |
+|---|---|
+| `bot_quota 10` | Set number of bots (0-32) |
+| `bot_difficulty 1` | Skill level (0=easy, 1=normal, 2=hard, 3=expert) |
+| `bot_add` | Add one bot immediately |
+| `bot_remove` | Remove one bot |
+| `bot_knifing_skill 100` | Make bots knife-aggressive (0-100) |
+| `bot_buy WEAPON` | Force bots to buy specific weapon |
+
+Example: **Spawn 10 hard bots for practice:**
+```
+rcon bot_quota 10
+rcon bot_difficulty 2
+```
+
+---
+
+### Monitoring & Logging
+
+The server logs all actions to:
+
+```
+/home/steam/csgo_server/csgo/logs/
+```
+
+Common log files:
+
+| File | Contains |
+|---|---|
+| `L*.log` | General server activity and kills/deaths |
+| `bans.log` | Banned players (if `sv_logbans 1`) |
+| `console.log` | Full console output |
+
+View live logs during gameplay:
+
+```bash
+sudo -u steam tail -f /home/steam/csgo_server/csgo/logs/L*.log
+```
+
+---
+
+### Stopping the Server
+
+**Graceful stop (from rcon):**
+```
+rcon quit
+```
+
+This gives connected players a chance to disconnect cleanly. Allow ~10 seconds for the process to exit.
+
+**Immediate stop (from SSH):**
+```bash
+sudo -u steam pkill -f srcds_run
+```
+
+Then detach from tmux: `Ctrl+B` then `D`
+
+**Clean restart (stop + start):**
+```bash
+# Kill the old process
+sudo -u steam pkill -f srcds_run
+
+# Wait a moment
+sleep 2
+
+# Start fresh in a new tmux session
+sudo -u steam tmux new-session -d -s csgo 'cd /home/steam/csgo_server && bash srcds_run -game csgo -console -usercon -maxplayers_override +maxplayers 16 +map de_dust2'
+```
+
+---
+
+### Server Performance Tuning
+
+After the server is running, you can optimize performance by tweaking `server.cfg`:
+
+**For high-skill competitive servers:**
+```
+fps_max 300              // Allow server to run at max capacity
+sv_mincmdrate 64         // Minimum updates per player
+sv_maxcmdrate 128        // Maximum updates per player
+net_splitpacketsize 1260 // Lower for unstable connections
+sv_client_predict 0      // Disable prediction for LAN/LAN-like
+```
+
+**For casual servers with many players:**
+```
+fps_max 100              // Limit CPU use
+sv_mincmdrate 30         // Lower server load
+sv_maxcmdrate 64
+sv_hibernate_when_empty 1  // Sleep during idle periods
+```
+
+Apply changes live with `rcon` or restart the server.
+
+---
+
+
 
 Non-secret values are saved to `defaults.ini` automatically after each successful wizard run. You can also edit it directly before running the deployer:
 

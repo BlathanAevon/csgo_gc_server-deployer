@@ -65,6 +65,32 @@ class DeployConfig:
     allow_web_ports: bool
     session_tool: str
     dry_run: bool
+    # Game mode and behavior
+    game_mode: str
+    mp_warmuptime: int
+    mp_freezetime: int
+    mp_roundtime: float
+    mp_buytime: int
+    sv_deadtalk: int
+    mp_startmoney: int
+    mp_maxmoney: int
+    mp_buy_anywhere: int
+    mp_autokick: int
+    mp_tkpunish: int
+    mp_forcecamera: int
+    # Bots
+    bot_quota: int
+    bot_difficulty: int
+    bot_controllable: int
+    # GOTV
+    tv_enable: int
+    tv_delaytime: int
+    tv_maxclients: int
+    # Logging
+    sv_logbans: int
+    sv_logecho: int
+    sv_log_onefile: int
+    sv_hibernate_when_empty: int
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -244,9 +270,49 @@ def disk_check(path: Path) -> None:
 
 def render_server_cfg(cfg: DeployConfig) -> str:
     return (
+        f'// Basic server identity\n'
         f'hostname "{cfg.hostname}"\n'
         f'rcon_password "{cfg.rcon_password}"\n'
         f'sv_password "{cfg.sv_password}"\n'
+        f'\n'
+        f'// Networking\n'
+        f'sv_lan 0\n'
+        f'sv_region 0\n'
+        f'\n'
+        f'// Match Timing\n'
+        f'mp_warmuptime {cfg.mp_warmuptime}\n'
+        f'mp_freezetime {cfg.mp_freezetime}\n'
+        f'mp_roundtime {cfg.mp_roundtime}\n'
+        f'mp_buytime {cfg.mp_buytime}\n'
+        f'\n'
+        f'// Communication\n'
+        f'sv_deadtalk {cfg.sv_deadtalk}\n'
+        f'\n'
+        f'// Economy\n'
+        f'mp_startmoney {cfg.mp_startmoney}\n'
+        f'mp_maxmoney {cfg.mp_maxmoney}\n'
+        f'mp_buy_anywhere {cfg.mp_buy_anywhere}\n'
+        f'\n'
+        f'// Team Dynamics\n'
+        f'mp_autokick {cfg.mp_autokick}\n'
+        f'mp_tkpunish {cfg.mp_tkpunish}\n'
+        f'mp_forcecamera {cfg.mp_forcecamera}\n'
+        f'\n'
+        f'// Bots\n'
+        f'bot_quota {cfg.bot_quota}\n'
+        f'bot_difficulty {cfg.bot_difficulty}\n'
+        f'bot_controllable {cfg.bot_controllable}\n'
+        f'\n'
+        f'// GOTV (Game Observation TV) - for spectators\n'
+        f'tv_enable {cfg.tv_enable}\n'
+        f'tv_delaytime {cfg.tv_delaytime}\n'
+        f'tv_maxclients {cfg.tv_maxclients}\n'
+        f'\n'
+        f'// Logging\n'
+        f'sv_logbans {cfg.sv_logbans}\n'
+        f'sv_logecho {cfg.sv_logecho}\n'
+        f'sv_log_onefile {cfg.sv_log_onefile}\n'
+        f'sv_hibernate_when_empty {cfg.sv_hibernate_when_empty}\n'
     )
 
 
@@ -458,6 +524,113 @@ def wizard() -> DeployConfig:
         tickrate=str(tickrate),
     )
 
+    # ── Step 3.5: Game Mode & Behavior (skippable) ──────────────────────────
+    _header("Step 3.5 / 4  —  Game mode & behavior")
+    configure_gamemode = _ask_bool(
+        "Customize game mode and behavior?",
+        default=False,
+        hint="Skip this to use competitive defaults.",
+    )
+
+    if configure_gamemode:
+        game_mode = _ask_choice(
+            "Game mode",
+            choices=["competitive", "casual", "deathmatch", "arms_race", "flying_scoutsman"],
+            default=d("game_mode", "competitive"),
+            hint="Determines game mechanics, economy, and team dynamics.",
+        )
+        saved["game_mode"] = game_mode
+
+        # Economy presets
+        economy_choice = _ask_choice(
+            "Economy preset",
+            choices=["conservative", "standard", "aggressive"],
+            default="standard",
+            hint="conservative: Low start money; standard: $2400; aggressive: High starting cash.",
+        )
+        if economy_choice == "conservative":
+            mp_startmoney, mp_maxmoney = 1000, 8000
+        elif economy_choice == "aggressive":
+            mp_startmoney, mp_maxmoney = 3500, 20000
+        else:
+            mp_startmoney, mp_maxmoney = 2400, 16000
+        saved["mp_startmoney"] = str(mp_startmoney)
+        saved["mp_maxmoney"] = str(mp_maxmoney)
+
+        # Match timing
+        mp_warmuptime = _ask_int("Warmup time (seconds)", default=int(d("mp_warmuptime", "60")), lo=0, hi=600)
+        mp_freezetime = _ask_int("Freeze time (seconds)", default=int(d("mp_freezetime", "15")), lo=0, hi=60)
+        mp_roundtime = _ask_int("Round time (minutes)", default=int(d("mp_roundtime", "1")), lo=1, hi=5)
+        mp_buytime = _ask_int("Buy time (seconds)", default=int(d("mp_buytime", "20")), lo=0, hi=120)
+        saved["mp_warmuptime"] = str(mp_warmuptime)
+        saved["mp_freezetime"] = str(mp_freezetime)
+        saved["mp_roundtime"] = str(mp_roundtime * 60)  # Convert to seconds (displayed as minutes)
+        saved["mp_buytime"] = str(mp_buytime)
+
+        # Team dynamics
+        sv_deadtalk = _ask_bool("Dead players can talk to all?", default=bool(int(d("sv_deadtalk", "0"))))
+        mp_autokick = _ask_bool("Auto-kick idle players?", default=bool(int(d("mp_autokick", "1"))))
+        mp_tkpunish = _ask_bool("Punish team killers?", default=bool(int(d("mp_tkpunish", "0"))))
+        mp_forcecamera = _ask_bool("Force dead players spectate killer?", default=bool(int(d("mp_forcecamera", "0"))))
+        saved["sv_deadtalk"] = "1" if sv_deadtalk else "0"
+        saved["mp_autokick"] = "1" if mp_autokick else "0"
+        saved["mp_tkpunish"] = "1" if mp_tkpunish else "0"
+        saved["mp_forcecamera"] = "1" if mp_forcecamera else "0"
+
+        # Bot configuration
+        bot_quota = _ask_int("Bot count", default=int(d("bot_quota", "10")), lo=0, hi=32)
+        bot_difficulty = _ask_choice(
+            "Bot difficulty",
+            choices=["0", "1", "2", "3"],
+            default=d("bot_difficulty", "1"),
+            hint="0=easy, 1=normal, 2=hard, 3=expert",
+        )
+        bot_controllable = _ask_bool("Allow player control of bots?", default=bool(int(d("bot_controllable", "1"))))
+        saved["bot_quota"] = str(bot_quota)
+        saved["bot_difficulty"] = str(bot_difficulty)
+        saved["bot_controllable"] = "1" if bot_controllable else "0"
+
+        # GOTV
+        tv_enable = _ask_bool("Enable GOTV (demo recording)?", default=bool(int(d("tv_enable", "1"))))
+        tv_maxclients = _ask_int("GOTV max spectators", default=int(d("tv_maxclients", "0")), lo=0, hi=128) if tv_enable else 0
+        tv_delaytime = _ask_int("GOTV delay (seconds)", default=int(d("tv_delaytime", "30")), lo=0, hi=120) if tv_enable else 30
+        saved["tv_enable"] = "1" if tv_enable else "0"
+        saved["tv_maxclients"] = str(tv_maxclients)
+        saved["tv_delaytime"] = str(tv_delaytime)
+
+        # Logging
+        sv_logbans = _ask_bool("Log bans?", default=bool(int(d("sv_logbans", "1"))))
+        sv_logecho = _ask_bool("Echo logs to console?", default=bool(int(d("sv_logecho", "1"))))
+        sv_log_onefile = _ask_bool("Log to single file?", default=bool(int(d("sv_log_onefile", "1"))))
+        sv_hibernate_when_empty = _ask_bool("Sleep server when empty?", default=bool(int(d("sv_hibernate_when_empty", "0"))))
+        saved["sv_logbans"] = "1" if sv_logbans else "0"
+        saved["sv_logecho"] = "1" if sv_logecho else "0"
+        saved["sv_log_onefile"] = "1" if sv_log_onefile else "0"
+        saved["sv_hibernate_when_empty"] = "1" if sv_hibernate_when_empty else "0"
+    else:
+        # Use defaults for all game mode settings
+        game_mode = d("game_mode", "competitive")
+        mp_startmoney = int(d("mp_startmoney", "2400"))
+        mp_maxmoney = int(d("mp_maxmoney", "16000"))
+        mp_warmuptime = int(d("mp_warmuptime", "60"))
+        mp_freezetime = int(d("mp_freezetime", "15"))
+        mp_roundtime = int(d("mp_roundtime", "115"))  # ~1.92 minutes in seconds
+        mp_buytime = int(d("mp_buytime", "20"))
+        sv_deadtalk = int(d("sv_deadtalk", "0"))
+        mp_autokick = int(d("mp_autokick", "1"))
+        mp_tkpunish = int(d("mp_tkpunish", "0"))
+        mp_forcecamera = int(d("mp_forcecamera", "0"))
+        bot_quota = int(d("bot_quota", "10"))
+        bot_difficulty = int(d("bot_difficulty", "1"))
+        bot_controllable = int(d("bot_controllable", "1"))
+        tv_enable = int(d("tv_enable", "1"))
+        tv_maxclients = int(d("tv_maxclients", "0"))
+        tv_delaytime = int(d("tv_delaytime", "30"))
+        sv_logbans = int(d("sv_logbans", "1"))
+        sv_logecho = int(d("sv_logecho", "1"))
+        sv_log_onefile = int(d("sv_log_onefile", "1"))
+        sv_hibernate_when_empty = int(d("sv_hibernate_when_empty", "0"))
+
     # ── Step 4: Security & extras ─────────────────────────────────────────
     _header("Step 4 / 4  —  Security & extras")
 
@@ -530,6 +703,32 @@ def wizard() -> DeployConfig:
         allow_web_ports=allow_web_ports,
         session_tool=session_tool,
         dry_run=dry_run,
+        # Game mode and behavior
+        game_mode=game_mode,
+        mp_warmuptime=mp_warmuptime,
+        mp_freezetime=mp_freezetime,
+        mp_roundtime=mp_roundtime,
+        mp_buytime=mp_buytime,
+        sv_deadtalk=sv_deadtalk,
+        mp_startmoney=mp_startmoney,
+        mp_maxmoney=mp_maxmoney,
+        mp_buy_anywhere=int(d("mp_buy_anywhere", "0")),
+        mp_autokick=mp_autokick,
+        mp_tkpunish=mp_tkpunish,
+        mp_forcecamera=mp_forcecamera,
+        # Bots
+        bot_quota=bot_quota,
+        bot_difficulty=bot_difficulty,
+        bot_controllable=bot_controllable,
+        # GOTV
+        tv_enable=tv_enable,
+        tv_delaytime=tv_delaytime,
+        tv_maxclients=tv_maxclients,
+        # Logging
+        sv_logbans=sv_logbans,
+        sv_logecho=sv_logecho,
+        sv_log_onefile=sv_log_onefile,
+        sv_hibernate_when_empty=sv_hibernate_when_empty,
     )
 
 
