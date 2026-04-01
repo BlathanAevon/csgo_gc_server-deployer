@@ -69,6 +69,7 @@ class DeployConfig:
     open_firewall: bool
     allow_web_ports: bool
     session_tool: str
+    verbose_logs: bool
     dry_run: bool
     install_sourcemod_stack: bool
     metamod_branch: str
@@ -238,7 +239,14 @@ def _ask_choice(label: str, choices: list[str], default: str, hint: str = "") ->
 # System / execution helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run(cmd: str, dry_run: bool = False, as_user: str | None = None) -> None:
+def _tail(text: str, lines: int = 20) -> str:
+    split = [ln for ln in text.splitlines() if ln.strip()]
+    if not split:
+        return ""
+    return "\n".join(split[-lines:])
+
+
+def run(cmd: str, dry_run: bool = False, as_user: str | None = None, verbose: bool = False) -> None:
     if as_user:
         command = ["su", "-", as_user, "-c", cmd]
         printable = f"su - {as_user} -c {shlex.quote(cmd)}"
@@ -249,7 +257,20 @@ def run(cmd: str, dry_run: bool = False, as_user: str | None = None) -> None:
     print(_c(f"  [RUN] {printable}", _DIM))
     if dry_run:
         return
-    subprocess.run(command, check=True)
+    if verbose:
+        subprocess.run(command, check=True)
+        return
+
+    proc = subprocess.run(command, check=False, text=True, capture_output=True)
+    if proc.returncode != 0:
+        err = _tail(proc.stderr)
+        out = _tail(proc.stdout)
+        msg_parts = [f"Command failed with exit code {proc.returncode}: {printable}"]
+        if out:
+            msg_parts.append("stdout (tail):\n" + out)
+        if err:
+            msg_parts.append("stderr (tail):\n" + err)
+        raise RuntimeError("\n".join(msg_parts))
 
 
 def write_text(path: Path, text: str, dry_run: bool) -> None:
@@ -266,6 +287,16 @@ def require_root_for_execute(dry_run: bool) -> None:
     if os.geteuid() != 0:
         raise RuntimeError(
             "Real execution requires root. Re-run with: sudo python3 csgo_gc_deployer.py"
+        )
+
+
+def require_token_for_execute(cfg: DeployConfig) -> None:
+    if cfg.dry_run:
+        return
+    if not cfg.steam_token or cfg.steam_token == "YOUR_STEAM_TOKEN":
+        raise RuntimeError(
+            "Steam token is required for real deployment. Re-run and provide a valid GSLT from "
+            f"{STEAM_TOKEN_URL} (App ID {STEAM_APP_ID})."
         )
 
 
@@ -339,6 +370,8 @@ def start_command(cfg: DeployConfig) -> str:
         "bash srcds_run",
         "-game csgo",
         "-console",
+        "+ip",
+        "0.0.0.0",
         "-tickrate",
         str(cfg.tickrate),
         "-port",
@@ -1161,11 +1194,12 @@ def wizard() -> DeployConfig:
 
     # ── Step 4: Security & extras ─────────────────────────────────────────
     _header("Step 4 / 4  —  Security & extras")
+    _info("Tip: Find your Steam2 ID at https://steamid.io (paste your profile URL, then copy STEAM_X:Y:Z).")
 
     admin_steamid = _ask_steam2_id(
         "Primary admin Steam2 ID",
         default=d("admin_steamid", ""),
-        hint="Optional but recommended for SourceMod admin panel. Example: STEAM_1:1:123456",
+        hint="Optional but recommended for SourceMod admin panel. Example: STEAM_1:1:123456 (lookup: steamid.io)",
     )
     saved["admin_steamid"] = admin_steamid
 
@@ -1198,6 +1232,13 @@ def wizard() -> DeployConfig:
         hint="Used in the startup instructions printed at the end.",
     )
     saved["session_tool"] = session_tool
+
+    verbose_logs = _ask_bool(
+        "Show full command logs during deployment?",
+        default=bool(int(d("verbose_logs", "0"))),
+        hint="Recommended: No. You will get concise progress status and only error tails.",
+    )
+    saved["verbose_logs"] = "1" if verbose_logs else "0"
 
     install_sourcemod_stack = True
     saved["install_sourcemod_stack"] = "1"
@@ -1257,6 +1298,7 @@ def wizard() -> DeployConfig:
         open_firewall=open_firewall,
         allow_web_ports=allow_web_ports,
         session_tool=session_tool,
+        verbose_logs=verbose_logs,
         dry_run=dry_run,
         install_sourcemod_stack=install_sourcemod_stack,
         metamod_branch=metamod_branch,
@@ -1321,6 +1363,7 @@ def _print_summary(cfg: DeployConfig) -> None:
         ("Open firewall",   "yes" if cfg.open_firewall else "no"),
         ("Web ports",       "yes" if cfg.allow_web_ports else "no"),
         ("Session tool",    cfg.session_tool),
+        ("Verbose logs",    "yes" if cfg.verbose_logs else "no (progress view)"),
     ]
     width = max(len(r[0]) for r in rows)
     for label, value in rows:
@@ -1432,8 +1475,30 @@ def _post_start_self_test(cfg: DeployConfig, attempts: int = 20, delay_sec: floa
     if session_check.returncode != 0:
         raise RuntimeError("Post-start self-test failed: detached session 'csgo' not found.")
 
+    listen_check = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            f"ss -lun | awk '{{print $5}}' | grep -E ':{cfg.port}$' >/dev/null 2>&1",
+        ],
+        check=False,
+    )
+    if listen_check.returncode != 0:
+        print(_c(f"  [WARN] Could not confirm UDP listener on port {cfg.port}. Check server console/logs.", _YELLOW))
+
     print(_c("  [OK] Server process check passed.", _GREEN))
     print(_c("  [OK] Session check passed.", _GREEN))
+    print(_c(f"  [OK] Startup checks complete for :{cfg.port}.", _GREEN))
+
+
+def _run_phase(title: str, steps: list[tuple[str, str | None]], cfg: DeployConfig) -> None:
+    _header(title)
+    total = len(steps)
+    for idx, (cmd, as_user) in enumerate(steps, start=1):
+        pct = int((idx / total) * 100)
+        print(_c(f"  [{idx}/{total}] {pct:>3}%", _BOLD, _CYAN))
+        run(cmd, cfg.dry_run, as_user, verbose=cfg.verbose_logs)
+    print(_c(f"  [OK] {title} complete.", _GREEN))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1446,6 +1511,7 @@ def deploy(cfg: DeployConfig) -> bool:
         raise RuntimeError("This tool supports Linux only.")
 
     require_root_for_execute(cfg.dry_run)
+    require_token_for_execute(cfg)
 
     check_path = cfg.install_dir.parent if cfg.install_dir.parent.exists() else Path("/")
     disk_check(check_path)
@@ -1453,18 +1519,12 @@ def deploy(cfg: DeployConfig) -> bool:
     if not _confirm_or_abort(cfg):
         return False
 
-    _header("Phase 1  —  System packages & steam user")
-    for cmd, as_user in preinstall_commands(cfg):
-        run(cmd, cfg.dry_run, as_user)
+    _run_phase("Phase 1  —  System packages & steam user", list(preinstall_commands(cfg)), cfg)
 
-    _header("Phase 2  —  SteamCMD + CS:GO server + csgo_gc")
-    for cmd, as_user in install_commands(cfg):
-        run(cmd, cfg.dry_run, as_user)
+    _run_phase("Phase 2  —  SteamCMD + CS:GO server + csgo_gc", list(install_commands(cfg)), cfg)
 
     if cfg.install_sourcemod_stack:
-        _header("Phase 2.5  —  Metamod:Source + SourceMod")
-        for cmd, as_user in addon_commands(cfg):
-            run(cmd, cfg.dry_run, as_user)
+        _run_phase("Phase 2.5  —  Metamod:Source + SourceMod", list(addon_commands(cfg)), cfg)
 
     _header("Phase 3  —  Config files")
     server_cfg_path  = cfg.install_dir / "csgo" / "cfg" / "server.cfg"
@@ -1481,14 +1541,15 @@ def deploy(cfg: DeployConfig) -> bool:
     write_text(stop_script_path, create_stop_script(cfg), cfg.dry_run)
     write_text(admin_script_path, create_admin_helper_script(cfg), cfg.dry_run)
 
-    run(f"chmod +x {shlex.quote(str(start_script_path))}", cfg.dry_run)
-    run(f"chmod +x {shlex.quote(str(console_script_path))}", cfg.dry_run)
-    run(f"chmod +x {shlex.quote(str(stop_script_path))}", cfg.dry_run)
-    run(f"chmod +x {shlex.quote(str(admin_script_path))}", cfg.dry_run)
+    run(f"chmod +x {shlex.quote(str(start_script_path))}", cfg.dry_run, verbose=cfg.verbose_logs)
+    run(f"chmod +x {shlex.quote(str(console_script_path))}", cfg.dry_run, verbose=cfg.verbose_logs)
+    run(f"chmod +x {shlex.quote(str(stop_script_path))}", cfg.dry_run, verbose=cfg.verbose_logs)
+    run(f"chmod +x {shlex.quote(str(admin_script_path))}", cfg.dry_run, verbose=cfg.verbose_logs)
     run(
         f"chown -R {shlex.quote(cfg.steam_user)}:{shlex.quote(cfg.steam_user)} "
         f"{shlex.quote(str(cfg.install_dir))}",
         cfg.dry_run,
+        verbose=cfg.verbose_logs,
     )
 
     if cfg.install_sourcemod_stack and cfg.plugin_source_path is not None:
@@ -1498,12 +1559,11 @@ def deploy(cfg: DeployConfig) -> bool:
             f"chown -R {shlex.quote(cfg.steam_user)}:{shlex.quote(cfg.steam_user)} "
             f"{shlex.quote(str(cfg.install_dir))}",
             cfg.dry_run,
+            verbose=cfg.verbose_logs,
         )
 
     if cfg.open_firewall:
-        _header("Phase 4  —  Firewall")
-        for cmd, as_user in firewall_commands(cfg):
-            run(cmd, cfg.dry_run, as_user)
+        _run_phase("Phase 4  —  Firewall", list(firewall_commands(cfg)), cfg)
 
     # ── Final instructions ─────────────────────────────────────────────────
     print()

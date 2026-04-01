@@ -68,6 +68,8 @@ The wizard starts immediately. Answer each prompt — press **Enter** to accept 
 
 > `sudo` is only needed when you choose real deployment at the end of the wizard. For a dry-run preview you can run without it.
 
+By default the deployer now shows compact progress status instead of full command spam. If you need raw command output for debugging, enable `Show full command logs during deployment?` in the wizard.
+
 ---
 
 ## Wizard Walkthrough
@@ -165,6 +167,7 @@ The deployer now writes the numeric mode pair into `server.cfg` and also passes 
 **Primary admin Steam2 ID**
 Set your SourceMod administrator identity in Steam2 format (example: `STEAM_1:1:123456`).
 The deployer writes this into SourceMod `admins_simple.ini` with full admin flags so the in-game admin panel works immediately.
+Tip: use https://steamid.io to convert your profile to Steam2 format.
 
 **Server join password**
 Leave blank for a public server (no password required to join). Fill in if you want a private server.
