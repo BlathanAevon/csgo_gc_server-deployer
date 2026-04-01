@@ -162,11 +162,9 @@ The deployer now writes the numeric mode pair into `server.cfg` and also passes 
 
 ### Step 4 — Security & extras
 
-**RCON password**
-The remote console password used to administrate the server. Leave blank to have the tool generate a cryptographically random password for you. The generated password is printed at the end of the wizard.
-
-**RCON port**
-The wizard configures a dedicated RCON port (default `27016`) so game traffic and admin control stay separate. This is more reliable than sharing the game port.
+**Primary admin Steam2 ID**
+Set your SourceMod administrator identity in Steam2 format (example: `STEAM_1:1:123456`).
+The deployer writes this into SourceMod `admins_simple.ini` with full admin flags so the in-game admin panel works immediately.
 
 **Server join password**
 Leave blank for a public server (no password required to join). Fill in if you want a private server.
@@ -178,7 +176,6 @@ If you answer `y`, the tool will install `ufw` (if not already present) and open
 |---|---|
 | 22 | SSH — keeps you connected to your VPS |
 | 27015 (or your custom port) | CS:GO game traffic |
-| 27016 (or your custom RCON port) | RCON administration (TCP) |
 | 80, 443 | Web (only if you also answer `y` to the follow-up question) |
 
 **Session manager**
@@ -327,27 +324,16 @@ If the server has a join password, CS:GO will prompt you for it.
 
 ---
 
-### Admin Login — Using RCON
+### Admin Login — SourceMod Admin Panel
 
-**Remote Console (RCON)** lets you execute server commands from your client or SSH terminal.
+The deployer uses SourceMod's built-in admin panel from the official AlliedModders stack.
+No RCON setup is required.
 
 **Recommended client flow:**
 
-1. From the CS:GO main menu, open the console (`~`)
-2. Enter: `rcon_address SERVER_IP:SERVER_PORT`
-3. Enter: `rcon_password "YOUR_ADMIN_PASSWORD"`
-4. Test it with: `rcon status`
-
-Use the dedicated RCON port from the wizard for `SERVER_PORT` (default `27016`), not the gameplay port.
-
-This is more reliable than typing `rcon_password` after you are already in-game. Some client builds behave inconsistently once you are connected to the server.
-
-Best practice for client-side reliability:
-
-- Set `rcon_address` and `rcon_password` from the main menu, then connect to the server.
-- Keep `rcon_password` quoted if it contains symbols.
-- Prefer a dedicated RCON port (`27016`) over reusing game traffic port (`27015`).
-- Treat in-game RCON as convenience only; keep an SSH-based admin path as primary control.
+1. Join the server with your admin Steam account.
+2. Open console and run: `sm_admin`
+3. Use the SourceMod admin menu for map changes, player moderation, and server management.
 
 **From SSH terminal:**
 
@@ -356,12 +342,11 @@ Best practice for client-side reliability:
 su - steam -c 'tmux attach -t csgo'
 ```
 
-Once attached, you can type server commands directly into the SRCDS console without using RCON at all. If you prefer remote admin tools, use a real Source RCON client instead of `nc`.
+Once attached, you can type server commands directly into the SRCDS console.
 
 For frictionless SSH administration, the deployer also creates:
 
 ```bash
-/home/steam/csgo_server/rcon.sh
 /home/steam/csgo_server/console.sh
 /home/steam/csgo_server/admin.sh
 ```
@@ -369,14 +354,12 @@ For frictionless SSH administration, the deployer also creates:
 Examples:
 
 ```bash
-su - steam -c '/home/steam/csgo_server/rcon.sh status'
-su - steam -c '/home/steam/csgo_server/rcon.sh changelevel de_dust2'
 su - steam -c '/home/steam/csgo_server/console.sh status'
 su - steam -c '/home/steam/csgo_server/admin.sh status'
 su - steam -c '/home/steam/csgo_server/admin.sh restart'
 ```
 
-When RCON is unreliable, use direct server-console injection (no RCON required):
+For command-line administration, use direct server-console injection:
 
 ```bash
 su - steam -c '/home/steam/csgo_server/console.sh status'
@@ -384,59 +367,48 @@ su - steam -c '/home/steam/csgo_server/console.sh mp_roundtime 2'
 su - steam -c '/home/steam/csgo_server/console.sh changelevel de_inferno'
 ```
 
-`console.sh` sends the command straight into the live tmux/screen SRCDS session. This avoids client-side RCON state issues and is the most frictionless fallback for administrators.
+`console.sh` sends the command straight into the live tmux/screen SRCDS session.
 
 ---
 
-### RCON Troubleshooting Checklist
+### Admin Panel Troubleshooting Checklist
 
-If `rcon status` fails in the game client:
+If `sm_admin` does not open:
 
-1. Verify server-side local admin works first:
-
-```bash
-su - steam -c '/home/steam/csgo_server/rcon.sh status'
-```
-
-2. Confirm the server is not LAN-locked:
+1. Verify SourceMod plugins are loaded:
 
 ```bash
-su - steam -c '/home/steam/csgo_server/rcon.sh sv_lan'
+su - steam -c '/home/steam/csgo_server/admin.sh cmd sm plugins list'
 ```
 
-Expected result should include `0`.
-
-3. Confirm firewall allows RCON port from your admin location:
+2. Verify your Steam2 admin identity is present:
 
 ```bash
-sudo ufw status numbered
+su - steam -c "grep -n 'STEAM_' /home/steam/csgo_server/csgo/addons/sourcemod/configs/admins_simple.ini"
 ```
 
-4. In client main-menu console, rebind in order:
+3. Reload admins and retry:
 
 ```text
-rcon_address YOUR_SERVER_IP:27016
-rcon_password "YOUR_PASSWORD"
-rcon status
+sm_reloadadmins
+sm_admin
 ```
 
-5. If the client still fails, manage with `console.sh` or by attaching SRCDS console directly (`tmux attach -t csgo`).
+4. If it still fails, manage with `console.sh` or by attaching SRCDS console directly (`tmux attach -t csgo`).
 
 ---
 
-### Essential RCON Commands
+### Essential Admin Commands
 
 | Command | Effect |
 |---|---|
-| `say TEXT` | Broadcast a message to all players |
-| `status` | List all connected players and their scores |
-| `changelevel MAP_NAME` | Change map immediately |
-| `kick PLAYER_ID` | Remove a player (use `status` to find ID) |
-| `ban PLAYER_ID TIME` | Ban a player (time in minutes; `0` = permanent) |
-| `mp_autokick 1` | Enable auto-kick of idle players |
-| `bot_add` | Add a bot |
-| `bot_knifing_skill 100` | Make bots more aggressive |
-| `quit` | Gracefully shut down the server |
+| `sm_admin` | Open SourceMod admin panel |
+| `sm_kick #userid` | Kick player |
+| `sm_ban #userid 30 reason` | Temporary ban |
+| `sm_map de_dust2` | Change map |
+| `status` | Show server/players in console |
+| `changelevel MAP_NAME` | Change map from server console |
+| `quit` | Gracefully shut down server |
 
 ---
 
@@ -491,10 +463,10 @@ mp_freezetime 0           // No freeze between spawns
 
 To apply changes after deployment:
 
-**Option A (in-game, temporary):**
-```
-rcon mp_freezetime 10
-rcon mp_warmuptime 120
+**Option A (live, temporary):**
+```bash
+su - steam -c '/home/steam/csgo_server/admin.sh cmd mp_freezetime 10'
+su - steam -c '/home/steam/csgo_server/admin.sh cmd mp_warmuptime 120'
 ```
 
 **Option B (persistent, via SSH):**
@@ -521,9 +493,9 @@ Control bot behavior with these commands:
 | `bot_buy WEAPON` | Force bots to buy specific weapon |
 
 Example: **Spawn 10 hard bots for practice:**
-```
-rcon bot_quota 10
-rcon bot_difficulty 2
+```bash
+su - steam -c '/home/steam/csgo_server/admin.sh cmd bot_quota 10'
+su - steam -c '/home/steam/csgo_server/admin.sh cmd bot_difficulty 2'
 ```
 
 ---
@@ -576,7 +548,7 @@ su - steam -c '/home/steam/csgo_server/admin.sh restart'
 su - steam -c '/home/steam/csgo_server/admin.sh status'
 su - steam -c '/home/steam/csgo_server/admin.sh attach'
 su - steam -c '/home/steam/csgo_server/admin.sh cmd changelevel de_inferno'
-su - steam -c '/home/steam/csgo_server/admin.sh rcon status'
+su - steam -c '/home/steam/csgo_server/admin.sh panel'
 ```
 
 ---
@@ -602,7 +574,7 @@ sv_maxcmdrate 64
 sv_hibernate_when_empty 1  // Sleep during idle periods
 ```
 
-Apply changes live with `rcon` or restart the server.
+Apply changes live with `admin.sh cmd ...` or restart the server.
 
 ---
 
@@ -626,7 +598,7 @@ steam_home  = /home/steam
 install_dir = /home/steam/csgo_server
 ```
 
-> Secrets (`steam_token`, `rcon_password`, `sv_password`) are **never** written to `defaults.ini`.
+> Secrets (`steam_token`, `sv_password`) are **never** written to `defaults.ini`.
 
 The `steam_user`, `steam_home`, and `install_dir` values are not asked during the wizard — change them here if your setup uses non-standard paths.
 
@@ -636,7 +608,7 @@ The `steam_user`, `steam_home`, and `install_dir` values are not asked during th
 
 - **Run as a dedicated user.** The deployer creates a `steam` system user and installs all server files under that account. The server process never runs as root.
 - **Tokens are single-use per server.** If a GSLT is leaked, only the server it belongs to is at risk.
-- **Passwords are not stored.** The `rcon_password` and `sv_password` are written only to `/home/steam/csgo_server/csgo/server.cfg`, which is owned by the `steam` user.
+- **Join password is not stored in defaults.** `sv_password` is written only to `/home/steam/csgo_server/csgo/cfg/server.cfg`, owned by the `steam` user.
 - **Dry-run first.** The default mode never touches the system, so you can verify the planned commands before committing.
 - **Firewall.** If you enable ufw, SSH port 22 is opened first — before the firewall is enabled — so you cannot accidentally lock yourself out.
 
