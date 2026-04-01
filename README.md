@@ -21,6 +21,7 @@ No flags, no manual commands — just answer the prompts and the tool does the r
   - [Confirmation summary](#confirmation-summary)
 - [After Deployment — Starting Your Server](#after-deployment--starting-your-server)
 - [Server Management — Connection & Administration](#server-management--connection--administration)
+- [SourceMod Plugins](#sourcemod-plugins)
 - [Customizing Defaults](#customizing-defaults)
 - [Security Notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
@@ -113,11 +114,12 @@ Press **Enter** (accepting `n`) to skip this step entirely and use the recommend
 You are asked whether you want to customise game mode and server behavior:
 
 **Game mode selection**
-- `competitive` — Valve ladder format (freeze time, economy rounds, defuse/plant objective)
-- `casual` — Relaxed economy with lower stakes
-- `deathmatch` — Unrestricted respawn, higher starting cash
-- `arms_race` — Progressive weapon upgrades per round
-- `flying_scoutsman` — Scout-only pistol mode
+- `competitive` — classic competitive, applied as `game_type 0` and `game_mode 1`
+- `casual` — classic casual, applied as `game_type 0` and `game_mode 0`
+- `deathmatch` — deathmatch, applied as `game_type 1` and `game_mode 2`
+- `arms_race` — arms race, applied as `game_type 1` and `game_mode 0`
+- `demolition` — demolition, applied as `game_type 1` and `game_mode 1`
+- `custom` — manual `game_type`, `game_mode`, and optional `sv_skirmish_id`
 
 **Economy preset** (only if customizing)
 - `conservative` — Low starting money ($1000–$8000 max), forces economic strategy
@@ -154,6 +156,8 @@ You are asked whether you want to customise game mode and server behavior:
 
 Press **Enter** to skip and accept competitive defaults, or answer `y` to customize these settings.
 
+The deployer now writes the numeric mode pair into `server.cfg` and also passes it on the launch command. That matters because CS:GO falls back to casual behavior unless the correct `game_type` / `game_mode` pair is applied.
+
 ---
 
 ### Step 4 — Security & extras
@@ -175,6 +179,21 @@ If you answer `y`, the tool will install `ufw` (if not already present) and open
 
 **Session manager**
 `tmux` or `screen` — both keep your server running after you disconnect from SSH. `tmux` is recommended.
+
+**Metamod:Source + SourceMod**
+If you answer `y`, the deployer downloads the current official stable AlliedModders builds and extracts them into your server automatically.
+
+**Plugin path**
+If SourceMod is enabled, you can optionally provide a local path on the VPS to one of these:
+
+| Artifact | Behavior |
+|---|---|
+| `.smx` | Installs the compiled plugin into `addons/sourcemod/plugins/` |
+| `.sp` | Copies source into `addons/sourcemod/scripting/` and compiles it with `spcomp` |
+| `.zip` / `.tar.gz` / `.tgz` | Extracts a packaged plugin bundle into the `csgo/` folder |
+| Directory | Merges the directory contents into the `csgo/` folder |
+
+If source or readable text files are present, the deployer performs a lightweight audit before confirmation and reports any obvious outbound URLs, HTTP/socket APIs, server-command calls, file-write calls, or SQL usage.
 
 ---
 
@@ -236,6 +255,49 @@ sudo -u steam bash -lc 'cd /home/steam/csgo_server && ./start_server.sh'
 
 **To re-attach:** `sudo -u steam tmux attach`
 
+If you enabled SourceMod, verify the addon stack after startup from the SRCDS console:
+
+```text
+meta version
+meta list
+sm version
+```
+
+---
+
+## SourceMod Plugins
+
+The deployer can now install the common SourceMod stack without a separate FTP/manual extraction step:
+
+1. It installs Metamod:Source first.
+2. It installs SourceMod second.
+3. It optionally deploys your plugin artifact.
+4. It prints audit notes before the final confirmation if readable source/config text is available.
+
+What the audit can and cannot tell you:
+
+- If you provide `.sp` source or a package containing source/config text, the deployer scans for outbound URLs, HTTP/socket APIs, server-command calls, file-write calls, and SQL access.
+- If you provide only a compiled `.smx`, the deployer cannot verify the safety claim from the binary alone. It can still install the plugin, but the audit remains incomplete.
+- The audit is heuristic, not a proof of safety. It is meant to surface the most important behavior quickly before installation.
+
+Best practice for community plugins:
+
+- Prefer a packaged release that includes the original `.sp` source alongside the compiled `.smx`.
+- Review any hardcoded URLs and confirm the domain belongs to the service you expect.
+- Avoid plugins that rely on broad `ServerCommand` usage unless you understand the control path.
+- Keep a copy of the original plugin package so you can diff future updates.
+
+Typical verification after the server is online:
+
+```text
+meta version
+meta list
+sm plugins list
+sm exts list
+```
+
+If a plugin should show your server in Discord or a control panel, also watch the server console on startup for load errors and the SourceMod logs under `/home/steam/csgo_server/csgo/addons/sourcemod/logs/`.
+
 ---
 
 ## Server Management — Connection & Administration
@@ -265,22 +327,23 @@ If the server has a join password, CS:GO will prompt you for it.
 
 **Remote Console (RCON)** lets you execute server commands from your client or SSH terminal.
 
-**In-game admin login:**
+**Recommended client flow:**
 
-1. Open the console (`~`)
-2. Enter: `rcon_password YOUR_ADMIN_PASSWORD`
-3. Execute a command to test: `rcon say Testing admin access`
+1. From the CS:GO main menu, open the console (`~`)
+2. Enter: `rcon_address SERVER_IP:SERVER_PORT`
+3. Enter: `rcon_password "YOUR_ADMIN_PASSWORD"`
+4. Test it with: `rcon status`
 
-If successful, you now have admin rights. Execute any RCON command with the `rcon CMD` prefix.
+This is more reliable than typing `rcon_password` after you are already in-game. Some client builds behave inconsistently once you are connected to the server.
 
 **From SSH terminal:**
 
 ```bash
-# Connect via SSH and use the terminal directly:
-echo "say Message from SSH terminal" | nc -w1 SERVER_IP SERVER_PORT
+# Attach to the server console and issue commands locally:
+su - steam -c 'tmux attach -t csgo'
 ```
 
-Or use a third-party RCON client. The most common is **SourceRCON** or **GameServers**.
+Once attached, you can type server commands directly into the SRCDS console without using RCON at all. If you prefer remote admin tools, use a real Source RCON client instead of `nc`.
 
 ---
 
@@ -293,7 +356,7 @@ Or use a third-party RCON client. The most common is **SourceRCON** or **GameSer
 | `changelevel MAP_NAME` | Change map immediately |
 | `kick PLAYER_ID` | Remove a player (use `status` to find ID) |
 | `ban PLAYER_ID TIME` | Ban a player (time in minutes; `0` = permanent) |
-| `mp_autokick 1` 15 Enable/disable auto-kick of idle players |
+| `mp_autokick 1` | Enable auto-kick of idle players |
 | `bot_add` | Add a bot |
 | `bot_knifing_skill 100` | Make bots more aggressive |
 | `quit` | Gracefully shut down the server |
@@ -302,10 +365,26 @@ Or use a third-party RCON client. The most common is **SourceRCON** or **GameSer
 
 ### Game Mode Configuration
 
-All game modes are controlled via `server.cfg` which is written by the deployer. You have these options:
+CS:GO dedicated servers do not become competitive just because `mp_freezetime`, `mp_roundtime`, and economy values look competitive. The server must receive the correct mode pair as well.
+
+Core pairs:
+
+| Preset | `game_type` | `game_mode` |
+|---|---:|---:|
+| Casual | `0` | `0` |
+| Competitive | `0` | `1` |
+| Arms Race | `1` | `0` |
+| Demolition | `1` | `1` |
+| Deathmatch | `1` | `2` |
+
+The deployer applies these values in both the launch command and `server.cfg`.
+
+Recommended presets:
 
 **Competitive (default)**
 ```
+game_type 0              // Classic game type
+game_mode 1              // Competitive mode
 mp_warmuptime 60          // Warm-up before match starts
 mp_freezetime 15          // Players frozen at round start
 mp_roundtime 1.92         // ~115 seconds per round
@@ -315,6 +394,8 @@ mp_maxmoney 16000         // Maximum team money
 
 **Casual mode**
 ```
+game_type 0
+game_mode 0
 mp_warmuptime 0           // No warm-up
 mp_freezetime 3           // Very short freeze
 mp_roundtime 3            // Longer rounds
@@ -324,10 +405,11 @@ mp_maxmoney 24000         // Higher economy
 
 **Deathmatch**
 ```
-game_mode 1               // DM mode
+game_type 1
+game_mode 2               // Deathmatch mode
 mp_startmoney 10000       // Very high cash
-mp_freakshow 0            // Normal spawning
-mp_teammate_visibility 1  // Teammates visible through walls
+mp_buytime 9999           // Always allow weapon selection
+mp_freezetime 0           // No freeze between spawns
 ```
 
 To apply changes after deployment:
@@ -342,7 +424,8 @@ rcon mp_warmuptime 120
 ```bash
 sudo -u steam nano /home/steam/csgo_server/csgo/server.cfg
 # Edit settings, save (Ctrl+X, Y, Enter)
-rcon quit  # Gracefully restart the server
+su - steam -c 'tmux attach -t csgo'
+# Then type: quit
 ```
 
 ---
@@ -417,7 +500,7 @@ sudo -u steam pkill -f srcds_run
 sleep 2
 
 # Start fresh in a new tmux session
-sudo -u steam tmux new-session -d -s csgo 'cd /home/steam/csgo_server && bash srcds_run -game csgo -console -usercon -maxplayers_override +maxplayers 16 +map de_dust2'
+sudo -u steam tmux new-session -d -s csgo 'cd /home/steam/csgo_server && ./start_server.sh'
 ```
 
 ---

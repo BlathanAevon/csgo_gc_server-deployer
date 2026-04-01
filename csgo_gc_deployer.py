@@ -9,12 +9,15 @@ from __future__ import annotations
 import configparser
 import getpass
 import os
+import re
 import secrets
 import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -23,6 +26,8 @@ STEAMCMD_TAR_URL = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_li
 CSGO_GC_URL = "https://github.com/mikkokko/csgo_gc/releases/download/continuous/csgo_gc-ubuntu-latest.zip"
 STEAM_TOKEN_URL = "https://steamcommunity.com/dev/managegameservers"
 STEAM_APP_ID = 4465480
+METAMOD_STABLE_BRANCH = "1.12"
+SOURCEMOD_STABLE_BRANCH = "1.12"
 
 DEFAULTS_FILE = Path(__file__).with_name("defaults.ini")
 
@@ -65,8 +70,17 @@ class DeployConfig:
     allow_web_ports: bool
     session_tool: str
     dry_run: bool
+    install_sourcemod_stack: bool
+    metamod_branch: str
+    sourcemod_branch: str
+    plugin_source_path: Path | None
+    plugin_install_mode: str
+    plugin_audit_notes: tuple[str, ...]
     # Game mode and behavior
     game_mode: str
+    game_type: int
+    game_mode_id: int
+    sv_skirmish_id: int
     mp_warmuptime: int
     mp_freezetime: int
     mp_roundtime: float
@@ -275,6 +289,11 @@ def render_server_cfg(cfg: DeployConfig) -> str:
         f'rcon_password "{cfg.rcon_password}"\n'
         f'sv_password "{cfg.sv_password}"\n'
         f'\n'
+        f'// Game mode\n'
+        f'game_type {cfg.game_type}\n'
+        f'game_mode {cfg.game_mode_id}\n'
+        f'sv_skirmish_id {cfg.sv_skirmish_id}\n'
+        f'\n'
         f'// Networking\n'
         f'sv_lan 0\n'
         f'sv_region 0\n'
@@ -317,13 +336,42 @@ def render_server_cfg(cfg: DeployConfig) -> str:
 
 
 def start_command(cfg: DeployConfig) -> str:
-    return (
-        "bash srcds_run -game csgo -console -usercon -insecure "
-        f"-tickrate {cfg.tickrate} +port {cfg.port} +map {cfg.map_name} "
-        f"-hostip {cfg.server_ip} +ip {cfg.server_ip} "
-        f"+sv_setsteamaccount {cfg.steam_token} "
-        f"-maxplayers_override {cfg.max_players}"
-    )
+    parts = [
+        "bash srcds_run",
+        "-game csgo",
+        "-console",
+        "-usercon",
+        "-tickrate",
+        str(cfg.tickrate),
+        "-port",
+        str(cfg.port),
+        "+net_public_adr",
+        cfg.server_ip,
+        "+sv_setsteamaccount",
+        cfg.steam_token,
+        "+sv_pure",
+        "1",
+        "+game_type",
+        str(cfg.game_type),
+        "+game_mode",
+        str(cfg.game_mode_id),
+    ]
+    if cfg.sv_skirmish_id:
+        parts.extend(["+sv_skirmish_id", str(cfg.sv_skirmish_id)])
+    parts.extend([
+        "+map",
+        cfg.map_name,
+        "+exec",
+        "server.cfg",
+        "-steam",
+        "-net_port_try",
+        "1",
+        "-maxplayers_override",
+        str(cfg.max_players),
+    ])
+    if cfg.bot_quota == 0:
+        parts.append("-nobots")
+    return " ".join(parts)
 
 
 def create_start_script(cfg: DeployConfig) -> str:
@@ -386,6 +434,85 @@ def install_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
     )
 
 
+def addon_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
+    game_dir = cfg.install_dir / "csgo"
+    yield (
+        f"cd {shlex.quote(str(game_dir))} && "
+        f"mms_name=\"$(wget -qO- https://mms.alliedmods.net/mmsdrop/{shlex.quote(cfg.metamod_branch)}/mmsource-latest-linux)\" && "
+        f"wget -N \"https://mms.alliedmods.net/mmsdrop/{cfg.metamod_branch}/$mms_name\" -O \"$mms_name\" && "
+        "tar -xzf \"$mms_name\" && rm -f \"$mms_name\"",
+        cfg.steam_user,
+    )
+    yield (
+        f"cd {shlex.quote(str(game_dir))} && "
+        f"sm_name=\"$(wget -qO- https://sm.alliedmods.net/smdrop/{shlex.quote(cfg.sourcemod_branch)}/sourcemod-latest-linux)\" && "
+        f"wget -N \"https://sm.alliedmods.net/smdrop/{cfg.sourcemod_branch}/$sm_name\" -O \"$sm_name\" && "
+        "tar -xzf \"$sm_name\" && rm -f \"$sm_name\"",
+        cfg.steam_user,
+    )
+
+
+def deploy_plugin_artifact(cfg: DeployConfig) -> None:
+    if cfg.plugin_source_path is None:
+        return
+
+    source_path = cfg.plugin_source_path
+    sourcemod_dir = cfg.install_dir / "csgo" / "addons" / "sourcemod"
+    staging_dir = cfg.install_dir / "_plugin_uploads"
+    print(_c(f"  [PLUGIN] {source_path}", _DIM))
+    if cfg.dry_run:
+        if cfg.plugin_install_mode == "smx":
+            print(_c(f"  [PLAN] Copy to {sourcemod_dir / 'plugins' / source_path.name}", _DIM))
+        elif cfg.plugin_install_mode == "source":
+            print(_c(f"  [PLAN] Compile {source_path.name} with spcomp and install resulting .smx", _DIM))
+        else:
+            print(_c(f"  [PLAN] Extract plugin package into {cfg.install_dir / 'csgo'}", _DIM))
+        return
+
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staged_path = staging_dir / source_path.name
+    if source_path.is_dir():
+        if staged_path.exists():
+            shutil.rmtree(staged_path)
+        shutil.copytree(source_path, staged_path)
+    else:
+        shutil.copy2(source_path, staged_path)
+
+    if cfg.plugin_install_mode == "smx":
+        target = sourcemod_dir / "plugins" / source_path.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(staged_path, target)
+    elif cfg.plugin_install_mode == "source":
+        scripting_dir = sourcemod_dir / "scripting"
+        plugins_dir = sourcemod_dir / "plugins"
+        scripting_dir.mkdir(parents=True, exist_ok=True)
+        plugins_dir.mkdir(parents=True, exist_ok=True)
+        target_source = scripting_dir / source_path.name
+        shutil.copy2(staged_path, target_source)
+        output_name = source_path.with_suffix(".smx").name
+        run(
+            f"cd {shlex.quote(str(scripting_dir))} && chmod +x ./spcomp && ./spcomp {shlex.quote(target_source.name)} -o../plugins/{shlex.quote(output_name)}",
+            dry_run=False,
+            as_user=cfg.steam_user,
+        )
+    elif cfg.plugin_install_mode == "directory":
+        destination = cfg.install_dir / "csgo"
+        for child in staged_path.iterdir():
+            target = destination / child.name
+            if child.is_dir():
+                shutil.copytree(child, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(child, target)
+    elif cfg.plugin_install_mode == "archive":
+        destination = cfg.install_dir / "csgo"
+        if staged_path.name.lower().endswith(".zip"):
+            with zipfile.ZipFile(staged_path) as archive:
+                _safe_extract_zip(archive, destination)
+        else:
+            with tarfile.open(staged_path) as archive:
+                _safe_extract_tar(archive, destination)
+
+
 def firewall_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
     yield "command -v ufw >/dev/null 2>&1 || apt-get install -y ufw", None
     yield "ufw allow 22", None
@@ -441,6 +568,152 @@ def _ask_int(label: str, default: int, lo: int, hi: int) -> int:
         except ValueError:
             pass
         print(_c(f"  ✗ Value must be an integer between {lo} and {hi}.", _RED))
+
+
+def _ask_float(label: str, default: float, lo: float, hi: float) -> float:
+    while True:
+        raw = _ask(label, default=str(default))
+        try:
+            val = float(raw)
+            if lo <= val <= hi:
+                return val
+        except ValueError:
+            pass
+        print(_c(f"  ✗ Value must be a number between {lo} and {hi}.", _RED))
+
+
+def _mode_launch_settings(mode_name: str) -> tuple[int, int, int]:
+    presets = {
+        "casual": (0, 0, 0),
+        "competitive": (0, 1, 0),
+        "arms_race": (1, 0, 0),
+        "demolition": (1, 1, 0),
+        "deathmatch": (1, 2, 0),
+    }
+    return presets.get(mode_name, presets["competitive"])
+
+
+def _recommended_map_for_mode(mode_name: str) -> str | None:
+    recommendations = {
+        "casual": "de_dust2",
+        "competitive": "de_dust2",
+        "arms_race": "ar_shoots",
+        "demolition": "de_lake",
+        "deathmatch": "de_dust2",
+    }
+    return recommendations.get(mode_name)
+
+
+def _ask_existing_path(label: str, default: str = "", hint: str = "", allow_blank: bool = True) -> Path | None:
+    while True:
+        raw = _ask(label, default=default, hint=hint)
+        if not raw:
+            return None if allow_blank else Path()
+        path = Path(raw).expanduser()
+        if path.exists():
+            return path.resolve()
+        print(_c("  ✗ Path does not exist on this machine.", _RED))
+
+
+def _artifact_install_mode(path: Path) -> str:
+    name = path.name.lower()
+    if path.is_dir():
+        return "directory"
+    if name.endswith(".smx"):
+        return "smx"
+    if name.endswith(".sp"):
+        return "source"
+    if name.endswith(".zip") or name.endswith(".tar.gz") or name.endswith(".tgz"):
+        return "archive"
+    return "unknown"
+
+
+def _scan_text_for_plugin_risks(label: str, text: str) -> list[str]:
+    notes: list[str] = []
+    url_hits = sorted(set(re.findall(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE)))
+    if url_hits:
+        notes.append(f"{label}: outbound URLs found -> {', '.join(url_hits[:5])}")
+
+    risk_patterns = {
+        "network APIs": [r"\bHTTPClient\b", r"\bHTTPRequest\b", r"\bSteamWorks_CreateHTTPRequest\b", r"\bSocket(?:Create|Connect|Send)\b"],
+        "server commands": [r"\bServerCommand\b", r"\bInsertServerCommand\b", r"\bFakeClientCommand(?:Ex)?\b"],
+        "file writes": [r"\bOpenFile\s*\(", r"\bWriteFile(?:Line)?\b", r"\bDeleteFile\b", r"\bRenameFile\b"],
+        "database access": [r"\bSQL_(?:Connect|TConnect|Query|FastQuery)\b"],
+    }
+    for category, patterns in risk_patterns.items():
+        hits = sorted({match.group(0) for pattern in patterns for match in re.finditer(pattern, text)})
+        if hits:
+            notes.append(f"{label}: {category} -> {', '.join(hits[:6])}")
+    return notes
+
+
+def _audit_plugin_artifact(path: Path) -> tuple[str, tuple[str, ...]]:
+    mode = _artifact_install_mode(path)
+    if mode == "unknown":
+        return mode, (f"Unsupported plugin artifact type: {path.name}",)
+    if mode == "smx":
+        return mode, (
+            "Compiled .smx binary detected; source-level audit is not possible from the binary alone.",
+            "Installation can proceed, but safety claims cannot be verified without the matching .sp source.",
+        )
+
+    notes: list[str] = []
+    scanned_files = 0
+
+    def scan_text_file(file_label: str, content: str) -> None:
+        nonlocal scanned_files
+        scanned_files += 1
+        notes.extend(_scan_text_for_plugin_risks(file_label, content))
+
+    if mode == "source":
+        scan_text_file(path.name, path.read_text(encoding="utf-8", errors="ignore"))
+    elif mode == "directory":
+        for candidate in sorted(path.rglob("*")):
+            if candidate.is_file() and candidate.suffix.lower() in {".sp", ".cfg", ".txt", ".ini", ".json", ".yml", ".yaml"}:
+                scan_text_file(str(candidate.relative_to(path)), candidate.read_text(encoding="utf-8", errors="ignore"))
+    elif mode == "archive":
+        if path.name.lower().endswith(".zip"):
+            with zipfile.ZipFile(path) as archive:
+                for member in archive.infolist():
+                    suffix = Path(member.filename).suffix.lower()
+                    if member.is_dir() or suffix not in {".sp", ".cfg", ".txt", ".ini", ".json", ".yml", ".yaml"}:
+                        continue
+                    with archive.open(member) as fh:
+                        scan_text_file(member.filename, fh.read().decode("utf-8", errors="ignore"))
+        else:
+            with tarfile.open(path) as archive:
+                for member in archive.getmembers():
+                    suffix = Path(member.name).suffix.lower()
+                    if not member.isfile() or suffix not in {".sp", ".cfg", ".txt", ".ini", ".json", ".yml", ".yaml"}:
+                        continue
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        continue
+                    scan_text_file(member.name, extracted.read().decode("utf-8", errors="ignore"))
+
+    if scanned_files == 0:
+        notes.append("No readable source/config text files were found to audit inside the plugin artifact.")
+    elif not notes:
+        notes.append(f"Scanned {scanned_files} text file(s); no obvious network, command, file-write, or SQL indicators were found.")
+    return mode, tuple(notes)
+
+
+def _safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in archive.infolist():
+        target = (destination / member.filename).resolve()
+        if not str(target).startswith(str(destination)):
+            raise RuntimeError(f"Unsafe archive entry blocked: {member.filename}")
+    archive.extractall(destination)
+
+
+def _safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in archive.getmembers():
+        target = (destination / member.name).resolve()
+        if not str(target).startswith(str(destination)):
+            raise RuntimeError(f"Unsafe archive entry blocked: {member.name}")
+    archive.extractall(destination)
 
 
 def wizard() -> DeployConfig:
@@ -535,11 +808,21 @@ def wizard() -> DeployConfig:
     if configure_gamemode:
         game_mode = _ask_choice(
             "Game mode",
-            choices=["competitive", "casual", "deathmatch", "arms_race", "flying_scoutsman"],
+            choices=["competitive", "casual", "deathmatch", "arms_race", "demolition", "custom"],
             default=d("game_mode", "competitive"),
-            hint="Determines game mechanics, economy, and team dynamics.",
+            hint="Uses real Source game_type/game_mode pairs. Pick custom if you need a manual pair or skirmish id.",
         )
         saved["game_mode"] = game_mode
+
+        if game_mode == "custom":
+            game_type = _ask_int("game_type", default=int(d("game_type", "0")), lo=0, hi=3)
+            game_mode_id = _ask_int("game_mode", default=int(d("game_mode_id", "0")), lo=0, hi=2)
+            sv_skirmish_id = _ask_int("sv_skirmish_id", default=int(d("sv_skirmish_id", "0")), lo=0, hi=99)
+        else:
+            game_type, game_mode_id, sv_skirmish_id = _mode_launch_settings(game_mode)
+        saved["game_type"] = str(game_type)
+        saved["game_mode_id"] = str(game_mode_id)
+        saved["sv_skirmish_id"] = str(sv_skirmish_id)
 
         # Economy presets
         economy_choice = _ask_choice(
@@ -560,11 +843,11 @@ def wizard() -> DeployConfig:
         # Match timing
         mp_warmuptime = _ask_int("Warmup time (seconds)", default=int(d("mp_warmuptime", "60")), lo=0, hi=600)
         mp_freezetime = _ask_int("Freeze time (seconds)", default=int(d("mp_freezetime", "15")), lo=0, hi=60)
-        mp_roundtime = _ask_int("Round time (minutes)", default=int(d("mp_roundtime", "1")), lo=1, hi=5)
+        mp_roundtime = _ask_float("Round time (minutes)", default=float(d("mp_roundtime", "1.92")), lo=0.5, hi=10.0)
         mp_buytime = _ask_int("Buy time (seconds)", default=int(d("mp_buytime", "20")), lo=0, hi=120)
         saved["mp_warmuptime"] = str(mp_warmuptime)
         saved["mp_freezetime"] = str(mp_freezetime)
-        saved["mp_roundtime"] = str(mp_roundtime * 60)  # Convert to seconds (displayed as minutes)
+        saved["mp_roundtime"] = str(mp_roundtime)
         saved["mp_buytime"] = str(mp_buytime)
 
         # Team dynamics
@@ -607,14 +890,28 @@ def wizard() -> DeployConfig:
         saved["sv_logecho"] = "1" if sv_logecho else "0"
         saved["sv_log_onefile"] = "1" if sv_log_onefile else "0"
         saved["sv_hibernate_when_empty"] = "1" if sv_hibernate_when_empty else "0"
+
+        recommended_map = _recommended_map_for_mode(game_mode)
+        if game_mode == "arms_race" and not map_name.startswith("ar_"):
+            _info(f"Arms Race works best with ar_ maps. Switching map to {recommended_map}.")
+            map_name = recommended_map or map_name
+            saved["map_name"] = map_name
+        elif game_mode == "demolition" and map_name == "de_dust2":
+            _info(f"Demolition works best with a demolition map. Switching map to {recommended_map}.")
+            map_name = recommended_map or map_name
+            saved["map_name"] = map_name
     else:
         # Use defaults for all game mode settings
         game_mode = d("game_mode", "competitive")
+        game_type, game_mode_id, default_skirmish = _mode_launch_settings(game_mode)
+        game_type = int(d("game_type", str(game_type)))
+        game_mode_id = int(d("game_mode_id", str(game_mode_id)))
+        sv_skirmish_id = int(d("sv_skirmish_id", str(default_skirmish)))
         mp_startmoney = int(d("mp_startmoney", "2400"))
         mp_maxmoney = int(d("mp_maxmoney", "16000"))
         mp_warmuptime = int(d("mp_warmuptime", "60"))
         mp_freezetime = int(d("mp_freezetime", "15"))
-        mp_roundtime = int(d("mp_roundtime", "115"))  # ~1.92 minutes in seconds
+        mp_roundtime = float(d("mp_roundtime", "1.92"))
         mp_buytime = int(d("mp_buytime", "20"))
         sv_deadtalk = int(d("sv_deadtalk", "0"))
         mp_autokick = int(d("mp_autokick", "1"))
@@ -672,6 +969,37 @@ def wizard() -> DeployConfig:
     )
     saved["session_tool"] = session_tool
 
+    install_sourcemod_stack = _ask_bool(
+        "Install Metamod:Source + SourceMod?",
+        default=bool(int(d("install_sourcemod_stack", "0"))),
+        hint="Recommended if you plan to run admin plugins, Discord bridge plugins, or SourceMod menus.",
+    )
+    saved["install_sourcemod_stack"] = "1" if install_sourcemod_stack else "0"
+
+    metamod_branch = d("metamod_branch", METAMOD_STABLE_BRANCH)
+    sourcemod_branch = d("sourcemod_branch", SOURCEMOD_STABLE_BRANCH)
+    plugin_source_path: Path | None = None
+    plugin_install_mode = "none"
+    plugin_audit_notes: tuple[str, ...] = ()
+
+    if install_sourcemod_stack:
+        plugin_source_path = _ask_existing_path(
+            "Plugin path (.smx, .sp, .zip, .tar.gz, or folder)",
+            default=d("plugin_source_path", ""),
+            hint="Optional local path on this VPS. Leave blank to install only Metamod + SourceMod.",
+        )
+        if plugin_source_path is not None:
+            plugin_install_mode, plugin_audit_notes = _audit_plugin_artifact(plugin_source_path)
+            saved["plugin_source_path"] = str(plugin_source_path)
+            print()
+            _header("Plugin audit preview")
+            for note in plugin_audit_notes:
+                _info(note)
+        else:
+            saved["plugin_source_path"] = ""
+    else:
+        saved["plugin_source_path"] = ""
+
     steam_user = d("steam_user", "steam")
     steam_home = Path(d("steam_home", "/home/steam"))
     install_dir = Path(d("install_dir", "/home/steam/csgo_server"))
@@ -703,8 +1031,17 @@ def wizard() -> DeployConfig:
         allow_web_ports=allow_web_ports,
         session_tool=session_tool,
         dry_run=dry_run,
+        install_sourcemod_stack=install_sourcemod_stack,
+        metamod_branch=metamod_branch,
+        sourcemod_branch=sourcemod_branch,
+        plugin_source_path=plugin_source_path,
+        plugin_install_mode=plugin_install_mode,
+        plugin_audit_notes=plugin_audit_notes,
         # Game mode and behavior
         game_mode=game_mode,
+        game_type=game_type,
+        game_mode_id=game_mode_id,
+        sv_skirmish_id=sv_skirmish_id,
         mp_warmuptime=mp_warmuptime,
         mp_freezetime=mp_freezetime,
         mp_roundtime=mp_roundtime,
@@ -742,10 +1079,14 @@ def _print_summary(cfg: DeployConfig) -> None:
         ("Dry run",         "YES — no real changes" if cfg.dry_run else _c("NO — WILL CHANGE SYSTEM", _RED, _BOLD)),
         ("Server IP",       cfg.server_ip),
         ("Hostname",        cfg.hostname),
+        ("Mode preset",     cfg.game_mode),
+        ("Mode pair",       f"game_type {cfg.game_type} / game_mode {cfg.game_mode_id}"),
         ("Port",            str(cfg.port)),
         ("Map",             cfg.map_name),
         ("Max players",     str(cfg.max_players)),
         ("Tickrate",        str(cfg.tickrate)),
+        ("SourceMod stack", "yes" if cfg.install_sourcemod_stack else "no"),
+        ("Plugin artifact", str(cfg.plugin_source_path) if cfg.plugin_source_path else _c("(none)", _DIM)),
         ("RCON password",   _c("(set)", _DIM)),
         ("Join password",   _c("(set)", _DIM) if cfg.sv_password else _c("(none — public)", _DIM)),
         ("Steam user",      cfg.steam_user),
@@ -757,6 +1098,11 @@ def _print_summary(cfg: DeployConfig) -> None:
     width = max(len(r[0]) for r in rows)
     for label, value in rows:
         print(f"  {_c(label.ljust(width), _BOLD)}  {value}")
+    if cfg.plugin_audit_notes:
+        print()
+        _info("Plugin audit notes:")
+        for note in cfg.plugin_audit_notes:
+            _info(f"- {note}")
 
 
 def _confirm_or_abort(cfg: DeployConfig) -> bool:
@@ -765,17 +1111,35 @@ def _confirm_or_abort(cfg: DeployConfig) -> bool:
     return _ask_bool("Proceed?", default=False)
 
 
+def _session_start_command(session_tool: str, session_name: str, command: str) -> str:
+    if session_tool == "screen":
+        return f"screen -dmS {shlex.quote(session_name)} {shlex.quote(command)}"
+    return f"tmux new-session -d -s {shlex.quote(session_name)} {shlex.quote(command)}"
+
+
+def _session_attach_command(session_tool: str, session_name: str) -> str:
+    if session_tool == "screen":
+        return f"screen -r {shlex.quote(session_name)}"
+    return f"tmux attach -t {shlex.quote(session_name)}"
+
+
+def _session_kill_command(session_tool: str, session_name: str) -> str:
+    if session_tool == "screen":
+        return f"screen -S {shlex.quote(session_name)} -X quit 2>/dev/null; true"
+    return f"tmux kill-session -t {shlex.quote(session_name)} 2>/dev/null; true"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Post-deploy server launch
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _offer_launch(cfg: DeployConfig) -> None:
-    """Offer to start the server immediately in a detached tmux session."""
+    """Offer to start the server immediately in a detached session."""
     print()
     launch = _ask_bool(
         "Start the server now?",
         default=True,
-        hint=f"Launches as '{cfg.steam_user}' in a detached tmux session named 'csgo'.",
+        hint=f"Launches as '{cfg.steam_user}' in a detached {cfg.session_tool} session named 'csgo'.",
     )
     if not launch:
         return
@@ -784,24 +1148,31 @@ def _offer_launch(cfg: DeployConfig) -> None:
     start_script = str(cfg.install_dir / "start_server.sh")
 
     # Kill any stale same-named session silently
-    subprocess.run(
-        ["su", "-", cfg.steam_user, "-c",
-         f"tmux kill-session -t {session} 2>/dev/null; true"],
-        check=False,
-    )
+    subprocess.run(["su", "-", cfg.steam_user, "-c", _session_kill_command(cfg.session_tool, session)], check=False)
     result = subprocess.run(
-        ["su", "-", cfg.steam_user, "-c",
-         f"tmux new-session -d -s {shlex.quote(session)} {shlex.quote(start_script)}"],
+        ["su", "-", cfg.steam_user, "-c", _session_start_command(cfg.session_tool, session, start_script)],
         check=False,
     )
     if result.returncode != 0:
-        print(_c("  [WARN] Could not start tmux session automatically. Start the server manually using the command below.", _YELLOW))
+        print(_c(f"  [WARN] Could not start {cfg.session_tool} session automatically. Start the server manually using the command below.", _YELLOW))
         return
 
     print()
-    print(_c(f"  Server is running in tmux session '{session}'.", _GREEN, _BOLD))
-    _info(f"Attach to the console:  su - {cfg.steam_user} -c 'tmux attach -t {session}'")
-    _info("Detach without stopping: Ctrl+B then D")
+    print(_c(f"  Server is running in {cfg.session_tool} session '{session}'.", _GREEN, _BOLD))
+    _info(f"Attach to the console:  su - {cfg.steam_user} -c '{_session_attach_command(cfg.session_tool, session)}'")
+    if cfg.session_tool == "tmux":
+        _info("Detach without stopping: Ctrl+B then D")
+    else:
+        _info("Detach without stopping: Ctrl+A then D")
+    print()
+    _header("Connection & admin quick reference")
+    print(f"     connect {cfg.server_ip}:{cfg.port}")
+    if cfg.sv_password:
+        _info(f"Join password: {cfg.sv_password}")
+    _info("If RCON does not bind while already in-game, use the main-menu console flow below:")
+    print(f"     rcon_address {cfg.server_ip}:{cfg.port}")
+    print(f"     rcon_password \"{cfg.rcon_password}\"")
+    print("     rcon status")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -829,6 +1200,11 @@ def deploy(cfg: DeployConfig) -> bool:
     for cmd, as_user in install_commands(cfg):
         run(cmd, cfg.dry_run, as_user)
 
+    if cfg.install_sourcemod_stack:
+        _header("Phase 2.5  —  Metamod:Source + SourceMod")
+        for cmd, as_user in addon_commands(cfg):
+            run(cmd, cfg.dry_run, as_user)
+
     _header("Phase 3  —  Config files")
     server_cfg_path  = cfg.install_dir / "csgo" / "server.cfg"
     start_script_path = cfg.install_dir / "start_server.sh"
@@ -842,6 +1218,15 @@ def deploy(cfg: DeployConfig) -> bool:
         f"{shlex.quote(str(cfg.install_dir))}",
         cfg.dry_run,
     )
+
+    if cfg.install_sourcemod_stack and cfg.plugin_source_path is not None:
+        _header("Phase 3.5  —  Plugin deployment")
+        deploy_plugin_artifact(cfg)
+        run(
+            f"chown -R {shlex.quote(cfg.steam_user)}:{shlex.quote(cfg.steam_user)} "
+            f"{shlex.quote(str(cfg.install_dir))}",
+            cfg.dry_run,
+        )
 
     if cfg.open_firewall:
         _header("Phase 4  —  Firewall")
@@ -859,14 +1244,32 @@ def deploy(cfg: DeployConfig) -> bool:
         _offer_launch(cfg)
 
     _header("Manual start reference")
-    _info("Start the server in a detached tmux session:")
-    print(f"     su - {cfg.steam_user} -c 'tmux new-session -d -s csgo {cfg.install_dir}/start_server.sh'")
+    _info(f"Start the server in a detached {cfg.session_tool} session:")
+    print(f"     su - {cfg.steam_user} -c '{_session_start_command(cfg.session_tool, 'csgo', str(cfg.install_dir / 'start_server.sh'))}'")
     _info("Attach to the running session:")
-    print(f"     su - {cfg.steam_user} -c 'tmux attach -t csgo'")
-    _info("Detach without stopping the server: Ctrl+B then D")
+    print(f"     su - {cfg.steam_user} -c '{_session_attach_command(cfg.session_tool, 'csgo')}'")
+    if cfg.session_tool == "tmux":
+        _info("Detach without stopping the server: Ctrl+B then D")
+    else:
+        _info("Detach without stopping the server: Ctrl+A then D")
     print()
     _info("Full start command:")
     print(f"     {start_command(cfg)}")
+    print()
+    _header("Admin quick reference")
+    print(f"     connect {cfg.server_ip}:{cfg.port}")
+    if cfg.sv_password:
+        _info(f"Join password: {cfg.sv_password}")
+    print(f"     rcon_address {cfg.server_ip}:{cfg.port}")
+    print(f"     rcon_password \"{cfg.rcon_password}\"")
+    print("     rcon status")
+    if cfg.install_sourcemod_stack:
+        print()
+        _header("Addon verification")
+        print("     meta version")
+        print("     meta list")
+        print("     sm version")
+        print("     sm plugins list")
     return True
 
 
