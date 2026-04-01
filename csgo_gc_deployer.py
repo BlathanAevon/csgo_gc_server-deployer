@@ -300,7 +300,7 @@ def install_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
     yield (
         "~/steamcmd/steamcmd.sh "
         f"+force_install_dir {shlex.quote(str(cfg.install_dir))} "
-        "+login anonymous +app_update 740 -beta csgo_legacy validate +quit",
+        "+login anonymous +app_update 740 validate +quit",
         cfg.steam_user,
     )
     yield (
