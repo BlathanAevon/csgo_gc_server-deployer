@@ -379,7 +379,7 @@ def wizard() -> DeployConfig:
     # ── Banner ─────────────────────────────────────────────────────────────
     print()
     print(_c(" ╔══════════════════════════════════════════════════╗", _CYAN))
-    print(_c(" ║   CS:GO Legacy + csgo_gc  —  Server Deployer    ║", _CYAN, _BOLD))
+    print(_c(" ║   CS:GO Legacy + csgo_gc  —  Server Deployer     ║", _CYAN, _BOLD))
     print(_c(" ╚══════════════════════════════════════════════════╝", _CYAN))
     print()
     _info("Press Enter to accept a default shown in [brackets].")
@@ -405,7 +405,7 @@ def wizard() -> DeployConfig:
     saved["server_ip"] = server_ip
 
     hostname = _ask(
-        "Server hostname",
+        "Server name",
         default=d("hostname", "My CS:GO_GC Legacy Server"),
         hint="Displayed in the server browser.",
     )
@@ -426,7 +426,7 @@ def wizard() -> DeployConfig:
     # ── Step 3: Advanced settings (skippable) ─────────────────────────────
     _header("Step 3 / 4  —  Advanced settings")
     customize = _ask_bool(
-        "Customize port / map / players / tickrate?",
+        "Customize port / start map / max players / tickrate?",
         default=False,
         hint="Skip this to use recommended defaults.",
     )
@@ -453,7 +453,7 @@ def wizard() -> DeployConfig:
     _header("Step 4 / 4  —  Security & extras")
 
     rcon_raw = _ask(
-        "RCON password",
+        "admin password (RCON)",
         default="",
         hint="Leave blank to auto-generate a secure password.",
         secret=True,
@@ -551,19 +551,18 @@ def _print_summary(cfg: DeployConfig) -> None:
         print(f"  {_c(label.ljust(width), _BOLD)}  {value}")
 
 
-def _confirm_or_abort(cfg: DeployConfig) -> None:
+def _confirm_or_abort(cfg: DeployConfig) -> bool:
     _print_summary(cfg)
     print()
-    confirmed = _ask_bool("Proceed?", default=False)
-    if not confirmed:
-        raise RuntimeError("Deployment cancelled by user.")
+    return _ask_bool("Proceed?", default=False)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Main deploy routine
 # ──────────────────────────────────────────────────────────────────────────────
 
-def deploy(cfg: DeployConfig) -> None:
+def deploy(cfg: DeployConfig) -> bool:
+    """Run deployment. Returns False if the user declined the confirmation."""
     if sys.platform != "linux":
         raise RuntimeError("This tool supports Linux only.")
 
@@ -572,7 +571,8 @@ def deploy(cfg: DeployConfig) -> None:
     check_path = cfg.install_dir.parent if cfg.install_dir.parent.exists() else Path("/")
     disk_check(check_path)
 
-    _confirm_or_abort(cfg)
+    if not _confirm_or_abort(cfg):
+        return False
 
     _header("Phase 1  —  System packages & steam user")
     for cmd, as_user in preinstall_commands(cfg):
@@ -616,6 +616,7 @@ def deploy(cfg: DeployConfig) -> None:
     if cfg.dry_run:
         print()
         print(_c("  (Dry-run — no system changes were made)", _YELLOW))
+    return True
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -624,8 +625,12 @@ def deploy(cfg: DeployConfig) -> None:
 
 if __name__ == "__main__":
     try:
-        cfg = wizard()
-        deploy(cfg)
+        while True:
+            cfg = wizard()
+            if deploy(cfg):
+                break
+            print()
+            print(_c("  Starting over — press Ctrl+C at any time to quit.", _YELLOW))
     except KeyboardInterrupt:
         print()
         print(_c("  Interrupted.", _YELLOW))
