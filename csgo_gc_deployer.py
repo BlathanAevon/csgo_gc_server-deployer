@@ -460,23 +460,6 @@ def create_console_helper_script(cfg: DeployConfig) -> str:
     )
 
 
-def create_rcon_helper_script(cfg: DeployConfig) -> str:
-    return (
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        "if [[ $# -eq 0 ]]; then\n"
-        "  echo 'Usage: ./rcon.sh <command...>'\n"
-        "  echo 'Example: ./rcon.sh status'\n"
-        "  exit 1\n"
-        "fi\n"
-        "if ! command -v mcrcon >/dev/null 2>&1; then\n"
-        "  echo 'mcrcon is not installed. Install with: apt-get install -y mcrcon'\n"
-        "  exit 1\n"
-        "fi\n"
-        f"exec mcrcon -H 127.0.0.1 -P {cfg.rcon_port} -p {shlex.quote(cfg.rcon_password)} \"$@\"\n"
-    )
-
-
 def create_stop_script(cfg: DeployConfig) -> str:
     session = "csgo"
     return (
@@ -573,12 +556,11 @@ def create_admin_helper_script(cfg: DeployConfig) -> str:
         f"START_CMD={shlex.quote(start_cmd)}\n"
         "\n"
         "usage() {\n"
-        "  echo 'Usage: ./admin.sh <start|stop|restart|status|attach|cmd|rcon|panel> [args...]'\n"
+        "  echo 'Usage: ./admin.sh <start|stop|restart|status|attach|cmd|panel> [args...]'\n"
         "  echo 'Examples:'\n"
         "  echo '  ./admin.sh start'\n"
         "  echo '  ./admin.sh status'\n"
         "  echo '  ./admin.sh cmd changelevel de_dust2'\n"
-        "  echo '  ./admin.sh rcon status'\n"
         "  echo '  ./admin.sh panel'\n"
         "}\n"
         "\n"
@@ -643,10 +625,6 @@ def create_admin_helper_script(cfg: DeployConfig) -> str:
         "    cd \"$INSTALL_DIR\"\n"
         "    exec ./console.sh \"$@\"\n"
         "    ;;\n"
-        "  rcon)\n"
-        "    cd \"$INSTALL_DIR\"\n"
-        "    exec ./rcon.sh \"$@\"\n"
-        "    ;;\n"
         "  panel)\n"
         "    echo 'Open CS:GO and run: sm_admin'\n"
         "    echo 'If command is unknown, verify plugins with: ./admin.sh cmd sm plugins list'\n"
@@ -668,7 +646,7 @@ def preinstall_commands(cfg: DeployConfig) -> Iterable[tuple[str, str | None]]:
     yield "apt-get update", None
     yield (
         "apt-get install -y "
-        "lib32gcc-s1 lib32stdc++6 lib32z1 screen tmux tar debsig-verify wget unzip mcrcon",
+        "lib32gcc-s1 lib32stdc++6 lib32z1 screen tmux tar wget unzip",
         None,
     )
     yield (
@@ -1498,16 +1476,6 @@ def _offer_launch(cfg: DeployConfig) -> bool:
     return True
 
 
-def _run_local_rcon(cfg: DeployConfig, command: str) -> subprocess.CompletedProcess[str]:
-    rcon_helper = cfg.install_dir / "rcon.sh"
-    return subprocess.run(
-        ["su", "-", cfg.steam_user, "-c", f"{shlex.quote(str(rcon_helper))} {shlex.quote(command)}"],
-        check=False,
-        text=True,
-        capture_output=True,
-    )
-
-
 def _post_start_self_test(cfg: DeployConfig, attempts: int = 20, delay_sec: float = 1.0) -> None:
     """Validate that the server process is alive and session is present after startup."""
     _header("Post-start self-test")
@@ -1539,22 +1507,6 @@ def _post_start_self_test(cfg: DeployConfig, attempts: int = 20, delay_sec: floa
     if session_check.returncode != 0:
         raise RuntimeError("Post-start self-test failed: detached session 'csgo' not found.")
 
-    rcon_ok = False
-    last_rcon_out = ""
-    for _ in range(1, attempts + 1):
-        rcon_status = _run_local_rcon(cfg, "status")
-        rcon_out = (rcon_status.stdout + rcon_status.stderr).strip()
-        last_rcon_out = rcon_out or f"(exit {rcon_status.returncode})"
-        if rcon_status.returncode == 0:
-            rcon_ok = True
-            break
-        time.sleep(delay_sec)
-    if not rcon_ok:
-        raise RuntimeError(
-            "Post-start self-test failed: local RCON auth failed. "
-            f"Last output: {last_rcon_out}"
-        )
-
     listen_check = subprocess.run(
         [
             "bash",
@@ -1568,7 +1520,6 @@ def _post_start_self_test(cfg: DeployConfig, attempts: int = 20, delay_sec: floa
 
     print(_c("  [OK] Server process check passed.", _GREEN))
     print(_c("  [OK] Session check passed.", _GREEN))
-    print(_c("  [OK] Local RCON auth check passed.", _GREEN))
     print(_c(f"  [OK] Startup checks complete for :{cfg.port}.", _GREEN))
 
 
@@ -1611,7 +1562,6 @@ def deploy(cfg: DeployConfig) -> bool:
     server_cfg_path  = cfg.install_dir / "csgo" / "cfg" / "server.cfg"
     admins_simple_path = cfg.install_dir / "csgo" / "addons" / "sourcemod" / "configs" / "admins_simple.ini"
     start_script_path = cfg.install_dir / "start_server.sh"
-    rcon_script_path = cfg.install_dir / "rcon.sh"
     console_script_path = cfg.install_dir / "console.sh"
     stop_script_path = cfg.install_dir / "stop_server.sh"
     admin_script_path = cfg.install_dir / "admin.sh"
@@ -1619,13 +1569,11 @@ def deploy(cfg: DeployConfig) -> bool:
     write_text(server_cfg_path,  render_server_cfg(cfg), cfg.dry_run)
     write_text(admins_simple_path, create_sourcemod_admins_simple(cfg), cfg.dry_run)
     write_text(start_script_path, create_start_script(cfg), cfg.dry_run)
-    write_text(rcon_script_path, create_rcon_helper_script(cfg), cfg.dry_run)
     write_text(console_script_path, create_console_helper_script(cfg), cfg.dry_run)
     write_text(stop_script_path, create_stop_script(cfg), cfg.dry_run)
     write_text(admin_script_path, create_admin_helper_script(cfg), cfg.dry_run)
 
     run(f"chmod +x {shlex.quote(str(start_script_path))}", cfg.dry_run, verbose=cfg.verbose_logs)
-    run(f"chmod +x {shlex.quote(str(rcon_script_path))}", cfg.dry_run, verbose=cfg.verbose_logs)
     run(f"chmod +x {shlex.quote(str(console_script_path))}", cfg.dry_run, verbose=cfg.verbose_logs)
     run(f"chmod +x {shlex.quote(str(stop_script_path))}", cfg.dry_run, verbose=cfg.verbose_logs)
     run(f"chmod +x {shlex.quote(str(admin_script_path))}", cfg.dry_run, verbose=cfg.verbose_logs)
@@ -1687,8 +1635,7 @@ def deploy(cfg: DeployConfig) -> bool:
     print(f"     rcon_address {cfg.server_ip}:{cfg.rcon_port}")
     print(f"     rcon_password \"{cfg.rcon_password}\"")
     print("     rcon status")
-    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/rcon.sh status'")
-    print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/admin.sh rcon status'")
+    _info("RCON is intended for in-game client console use in this setup.")
     _info("In-game SourceMod admin panel command:")
     print("     sm_admin")
     print(f"     su - {cfg.steam_user} -c '{cfg.install_dir}/console.sh status'")

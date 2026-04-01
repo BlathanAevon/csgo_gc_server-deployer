@@ -357,7 +357,6 @@ For frictionless SSH administration, the deployer also creates:
 
 ```bash
 /home/steam/csgo_server/console.sh
-/home/steam/csgo_server/rcon.sh
 /home/steam/csgo_server/admin.sh
 ```
 
@@ -365,7 +364,6 @@ Examples:
 
 ```bash
 su - steam -c '/home/steam/csgo_server/console.sh status'
-su - steam -c '/home/steam/csgo_server/rcon.sh status'
 su - steam -c '/home/steam/csgo_server/admin.sh status'
 su - steam -c '/home/steam/csgo_server/admin.sh restart'
 ```
